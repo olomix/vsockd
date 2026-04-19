@@ -194,21 +194,21 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 7: vsockconn abstraction
 
-- [ ] in `internal/vsockconn/vsockconn.go` define:
+- [x] in `internal/vsockconn/vsockconn.go` define:
   - `Dialer` interface { `Dial(cid, port uint32) (net.Conn, error)` }
   - `Listener` interface — wraps `net.Listener` but `Accept()` also
     returns the peer CID
-- [ ] real implementation `NewVsockDialer()` / `ListenVsock(port uint32)`
+- [x] real implementation `NewVsockDialer()` / `ListenVsock(port uint32)`
       using `github.com/mdlayher/vsock`
-- [ ] loopback-TCP fallback for CI/dev: `NewLoopbackDialer(registry)` and
+- [x] loopback-TCP fallback for CI/dev: `NewLoopbackDialer(registry)` and
       `ListenLoopback(registry, cid, port)` — a small in-process registry
       maps `(cid, port)` to real `127.0.0.1:<ephemeral>` listeners, and the
       fallback Accept returns the fake peer CID
-- [ ] pick the backend via build tag or config flag
+- [x] pick the backend via build tag or config flag
       (`VSOCKD_BACKEND=loopback` env var used only by tests)
-- [ ] write tests for the loopback backend: dial/accept roundtrip, peer
+- [x] write tests for the loopback backend: dial/accept roundtrip, peer
       CID reported correctly, unknown CID → ECONNREFUSED-like error
-- [ ] run `go test ./internal/vsockconn/...` — must pass before next task
+- [x] run `go test ./internal/vsockconn/...` — must pass before next task
 
 ### Task 8: Inbound listener
 
