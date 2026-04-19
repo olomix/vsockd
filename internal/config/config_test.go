@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,4 +404,59 @@ func TestLoadMissingFile(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing file")
 	}
+}
+
+// TestVsockPortBoundary documents the boundary between accepted vsock port
+// values and the reserved PortAny sentinel: 0xFFFFFFFE (4294967294) is a
+// valid user port, while 0xFFFFFFFF (4294967295 = vsock.PortAny) must be
+// rejected.
+func TestVsockPortBoundary(t *testing.T) {
+	tmpl := `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: %d}
+outbound:
+  - port: %d
+    cids:
+      - {cid: 16, allowed_hosts: ["*"]}
+`
+	t.Run("max valid port 0xFFFFFFFE accepted", func(t *testing.T) {
+		const maxPort = 0xFFFFFFFE
+		yamlDoc := fmt.Sprintf(tmpl, maxPort, maxPort)
+		cfg, err := config.Load(writeConfig(t, yamlDoc))
+		if err != nil {
+			t.Fatalf("Load rejected valid port 0xFFFFFFFE: %v", err)
+		}
+		if got := cfg.Inbound[0].Routes[0].VsockPort; got != maxPort {
+			t.Fatalf("inbound route vsock_port = %d, want %d", got, maxPort)
+		}
+		if got := cfg.Outbound[0].Port; got != maxPort {
+			t.Fatalf("outbound port = %d, want %d", got, maxPort)
+		}
+	})
+
+	t.Run("PortAny 0xFFFFFFFF rejected (inbound route)", func(t *testing.T) {
+		yamlDoc := fmt.Sprintf(tmpl, uint32(0xFFFFFFFF), uint32(8080))
+		_, err := config.Load(writeConfig(t, yamlDoc))
+		if err == nil {
+			t.Fatalf("expected PortAny (0xFFFFFFFF) to be rejected on route")
+		}
+		if !strings.Contains(err.Error(), "out of range") {
+			t.Fatalf("error %q does not mention out of range", err.Error())
+		}
+	})
+
+	t.Run("PortAny 0xFFFFFFFF rejected (outbound port)", func(t *testing.T) {
+		yamlDoc := fmt.Sprintf(tmpl, uint32(8080), uint32(0xFFFFFFFF))
+		_, err := config.Load(writeConfig(t, yamlDoc))
+		if err == nil {
+			t.Fatalf("expected PortAny (0xFFFFFFFF) to be rejected on port")
+		}
+		if !strings.Contains(err.Error(), "out of range") {
+			t.Fatalf("error %q does not mention out of range", err.Error())
+		}
+	})
 }

@@ -43,6 +43,13 @@ type Server struct {
 	listeners []*listener
 	ctx       context.Context
 
+	// dialCtx is derived from ctx in Start and cancelled by Shutdown when
+	// the grace window elapses. handle() watches it while an upstream vsock
+	// Dial is outstanding so a stuck dial cannot hold the process past
+	// shutdown_grace.
+	dialCtx    context.Context
+	cancelDial context.CancelFunc
+
 	// activeConn tracks every in-flight connection (both client-side and
 	// upstream) so Shutdown can force-close them if the grace deadline
 	// elapses before the proxy goroutines finish.
@@ -122,6 +129,7 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	s.ctx = ctx
+	s.dialCtx, s.cancelDial = context.WithCancel(ctx)
 	for _, ln := range s.listeners {
 		if err := ln.bind(); err != nil {
 			for _, other := range s.listeners {
@@ -140,25 +148,47 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Apply reconciles the running listeners with the supplied configuration.
-// Listeners whose (bind, port, mode) key matches an existing one keep their
-// TCP listener alive but atomically swap their route table so that already
-// in-flight connections continue with the rules they started on while new
-// connections immediately see the new rules. Listeners that disappeared are
-// closed; listeners that appeared are bound and their accept loops spawned.
+// ApplyPlan holds the pending diff computed by PrepareApply. It carries the
+// listeners that still need to be bound (phase 1 already bound them), the
+// route-table swaps to apply to kept listeners, the new listener order, and
+// the set of existing listeners that must be closed on commit. Callers must
+// call either CommitApply or AbortApply exactly once per plan.
+type ApplyPlan struct {
+	server   *Server
+	next     []*listener
+	newBinds []*listener
+	swaps    []applySwap
+	existing map[string]*listener
+	kept     map[string]bool
+	// committed guards against double-commit / commit-after-abort. The
+	// server mutex is not held between Prepare and Commit, so a stray call
+	// would otherwise silently mutate the running state.
+	committed bool
+	aborted   bool
+}
+
+type applySwap struct {
+	listener *listener
+	routes   map[string]config.Route
+}
+
+// PrepareApply validates the new configuration, binds any listeners that
+// need to appear, and records the diff without touching any running state.
+// The returned plan must be either committed via CommitApply (to publish
+// the diff) or rolled back via AbortApply (to release the newly bound
+// sockets). On error no listener is bound and nothing is mutated.
 //
-// Apply is atomic: if any validation or bind fails, no running listener is
-// mutated and any listener bound during this call is closed before the
-// error is returned.
-func (s *Server) Apply(cfgs []config.InboundListener) error {
+// Splitting the work this way lets app.Reload stage both inbound and
+// outbound changes before committing either, so a partial reload cannot
+// leave the daemon in a half-new state when one subsystem's bind fails.
+func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.ctx == nil {
-		return errors.New("inbound: Apply called before Start")
+		return nil, errors.New("inbound: PrepareApply called before Start")
 	}
 
-	// Index current listeners by key so we can diff in O(n).
 	existing := make(map[string]*listener, len(s.listeners))
 	// existingByAddr lets us detect mode changes on an already-bound
 	// bind:port — a case the Apply path cannot handle atomically because
@@ -170,17 +200,9 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 		existingByAddr[ln.addr()] = ln
 	}
 
-	// Phase 1: construct all listeners, bind new ones, and record the
-	// route swaps to apply to kept listeners. Nothing observable changes
-	// in this phase; a failure closes any just-bound sockets and leaves
-	// the running state unchanged.
-	type pendingSwap struct {
-		listener *listener
-		routes   map[string]config.Route
-	}
 	kept := make(map[string]bool, len(cfgs))
 	next := make([]*listener, 0, len(cfgs))
-	var swaps []pendingSwap
+	var swaps []applySwap
 	var newBinds []*listener
 	cleanup := func() {
 		for _, ln := range newBinds {
@@ -193,7 +215,7 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 		newLn, err := newListener(cfg, s)
 		if err != nil {
 			cleanup()
-			return fmt.Errorf("inbound[%d]: %w", i, err)
+			return nil, fmt.Errorf("inbound[%d]: %w", i, err)
 		}
 		k := newLn.key()
 		if cur, ok := existing[k]; ok {
@@ -201,7 +223,7 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 			// handle path reads — so we only need to swap the routes map.
 			// Leaving cur.cfg alone avoids a data race with accept-loop
 			// readers that don't take the server's mu.
-			swaps = append(swaps, pendingSwap{cur, newLn.routesSnapshot()})
+			swaps = append(swaps, applySwap{cur, newLn.routesSnapshot()})
 			kept[k] = true
 			next = append(next, cur)
 			continue
@@ -212,43 +234,89 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 		// the operator can restart the daemon to apply the mode change.
 		if cur, addrMatch := existingByAddr[newLn.addr()]; addrMatch {
 			cleanup()
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"inbound[%d]: cannot change mode on %s from %q to %q at runtime; restart required",
 				i, newLn.addr(), cur.cfg.Mode, newLn.cfg.Mode)
 		}
 		if err := newLn.bind(); err != nil {
 			cleanup()
-			return err
+			return nil, err
 		}
 		newBinds = append(newBinds, newLn)
 		next = append(next, newLn)
 	}
 
-	// Phase 2: commit. No failure path remains past this point.
-	for _, sw := range swaps {
+	return &ApplyPlan{
+		server:   s,
+		next:     next,
+		newBinds: newBinds,
+		swaps:    swaps,
+		existing: existing,
+		kept:     kept,
+	}, nil
+}
+
+// CommitApply publishes the diff built by PrepareApply: kept listeners get
+// their new routes, newly bound listeners start their accept loops, and
+// listeners absent from the new config are closed. This phase cannot fail
+// and is idempotent (subsequent calls are no-ops).
+func (p *ApplyPlan) CommitApply() {
+	if p == nil || p.committed || p.aborted {
+		return
+	}
+	s := p.server
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, sw := range p.swaps {
 		sw.listener.replaceRoutes(sw.routes)
 	}
-	for _, ln := range newBinds {
+	for _, ln := range p.newBinds {
 		s.wg.Add(1)
 		go func(l *listener) {
 			defer s.wg.Done()
 			l.run(s.ctx)
 		}(ln)
 	}
-	// Close listeners that disappeared from the config.
-	for k, ln := range existing {
-		if !kept[k] {
+	for k, ln := range p.existing {
+		if !p.kept[k] {
 			ln.close()
 		}
 	}
-	s.listeners = next
+	s.listeners = p.next
+	p.committed = true
+}
+
+// AbortApply releases any listeners bound by PrepareApply without touching
+// the running state. Safe to call on a nil plan and idempotent.
+func (p *ApplyPlan) AbortApply() {
+	if p == nil || p.committed || p.aborted {
+		return
+	}
+	for _, ln := range p.newBinds {
+		ln.close()
+	}
+	p.aborted = true
+}
+
+// Apply is a convenience wrapper around PrepareApply + CommitApply kept for
+// tests and any caller that doesn't need to coordinate with other
+// subsystems' reloads. Use PrepareApply/CommitApply for cross-subsystem
+// atomicity.
+func (s *Server) Apply(cfgs []config.InboundListener) error {
+	plan, err := s.PrepareApply(cfgs)
+	if err != nil {
+		return err
+	}
+	plan.CommitApply()
 	return nil
 }
 
 // Shutdown stops every accept loop and waits for in-flight proxy goroutines
-// to drain. If ctx expires first, remaining connections are force-closed and
-// ctx.Err() is returned; callers can still Wait on the Server to observe the
-// forced teardown.
+// to drain. If ctx expires first, dialCtx is cancelled (unblocking any
+// still-pending upstream dials), remaining connections are force-closed,
+// and ctx.Err() is returned. Callers can still Wait on the Server to
+// observe the forced teardown.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	for _, ln := range s.listeners {
@@ -264,8 +332,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
+		if s.cancelDial != nil {
+			s.cancelDial()
+		}
 		return nil
 	case <-ctx.Done():
+		if s.cancelDial != nil {
+			s.cancelDial()
+		}
 		s.connMu.Lock()
 		for c := range s.activeConn {
 			_ = c.Close()
@@ -426,7 +500,7 @@ func (l *listener) handle(ctx context.Context, c net.Conn) {
 	routeLabel := route.Hostname
 	l.server.metric.InboundConnections.WithLabelValues(routeLabel).Inc()
 
-	upstream, err := l.server.dialer.Dial(route.CID, route.VsockPort)
+	upstream, err := l.dialUpstream(route.CID, route.VsockPort)
 	if err != nil {
 		l.server.metric.InboundErrors.
 			WithLabelValues(routeLabel, metrics.InboundErrorDial).Inc()
@@ -452,6 +526,37 @@ func (l *listener) handle(ctx context.Context, c net.Conn) {
 	l.proxy(c, upstream, routeLabel)
 }
 
+// dialUpstream calls the injected vsock Dialer and makes the call
+// cancellable via the server's dialCtx. The Dialer interface is
+// intentionally context-free (the Linux vsock syscall is synchronous), so
+// we run the dial in a goroutine and race it against dialCtx. If dialCtx
+// wins, a cleanup goroutine closes the conn once the dial eventually
+// returns — bounded by vsock's own connect timeout, after which the
+// worker-goroutine count returns to baseline.
+func (l *listener) dialUpstream(cid, port uint32) (net.Conn, error) {
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := l.server.dialer.Dial(cid, port)
+		ch <- result{c, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.c, r.err
+	case <-l.server.dialCtx.Done():
+		go func() {
+			r := <-ch
+			if r.err == nil {
+				_ = r.c.Close()
+			}
+		}()
+		return nil, l.server.dialCtx.Err()
+	}
+}
+
 func (l *listener) sniff(r io.Reader) (string, []byte, error) {
 	switch l.cfg.Mode {
 	case config.ModeHTTPHost:
@@ -463,8 +568,11 @@ func (l *listener) sniff(r io.Reader) (string, []byte, error) {
 	}
 }
 
-// proxy runs the bidirectional copy between client and upstream. Each
-// direction ends by closing the destination so the peer observes EOF.
+// proxy runs the bidirectional copy between client and upstream. When one
+// direction ends we only half-close the destination (CloseWrite) so the
+// reverse direction can still finish — e.g. a client that finished sending
+// but is still expecting response bytes. Full teardown happens via the
+// outer defer'd Close once both goroutines have returned.
 func (l *listener) proxy(
 	client net.Conn,
 	upstream net.Conn,
@@ -482,7 +590,7 @@ func (l *listener) proxy(
 			l.server.metric.InboundErrors.
 				WithLabelValues(routeLabel, metrics.InboundErrorCopy).Inc()
 		}
-		_ = upstream.Close()
+		halfCloseWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
@@ -493,9 +601,20 @@ func (l *listener) proxy(
 			l.server.metric.InboundErrors.
 				WithLabelValues(routeLabel, metrics.InboundErrorCopy).Inc()
 		}
-		_ = client.Close()
+		halfCloseWrite(client)
 	}()
 	wg.Wait()
+}
+
+// halfCloseWrite shuts down the write side of c when the underlying type
+// supports it (TCP, vsock), otherwise falls back to a full Close. Used by
+// the proxy paths to preserve half-close semantics across the tunnel.
+func halfCloseWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = c.Close()
 }
 
 func isExpectedCopyErr(err error) bool {

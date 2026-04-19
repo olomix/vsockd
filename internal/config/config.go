@@ -34,8 +34,9 @@ const (
 // VSOCK reserves CIDs 0..2 (hypervisor/local/host). Enclave CIDs start at 3.
 const minCID uint32 = 3
 
-// vsock.PortAny (0xFFFFFFFF) is excluded from the valid range.
-const maxVsockPort uint32 = 0xFFFFFFFE
+// vsockPortAny is the reserved "any port" sentinel (vsock.PortAny). Config
+// values equal to this are rejected; any other uint32 is a valid vsock port.
+const vsockPortAny uint32 = 0xFFFFFFFF
 
 // Config is the top-level vsockd configuration.
 type Config struct {
@@ -152,7 +153,7 @@ func (c *Config) Validate() error {
 
 	for i := range c.Outbound {
 		ob := &c.Outbound[i]
-		if ob.Port == 0 || ob.Port >= maxVsockPort {
+		if ob.Port == 0 || ob.Port >= vsockPortAny {
 			return fmt.Errorf("outbound[%d]: port %d out of range", i, ob.Port)
 		}
 		if seenPort[ob.Port] {
@@ -241,7 +242,7 @@ func (il *InboundListener) validate() error {
 			return fmt.Errorf("routes[%d]: cid %d must be >= %d",
 				i, r.CID, minCID)
 		}
-		if r.VsockPort == 0 || r.VsockPort >= maxVsockPort {
+		if r.VsockPort == 0 || r.VsockPort >= vsockPortAny {
 			return fmt.Errorf("routes[%d]: vsock_port %d out of range",
 				i, r.VsockPort)
 		}

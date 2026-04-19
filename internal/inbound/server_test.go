@@ -722,6 +722,93 @@ func TestApplyModeChangeSameAddrReturnsClearError(t *testing.T) {
 	}
 }
 
+// blockingDialer hangs every Dial call until release is closed. Used to
+// exercise the dial-cancellation path in Shutdown: without dialCtx being
+// plumbed through, handle() would stay blocked here indefinitely and
+// Shutdown would hang past its grace window.
+type blockingDialer struct {
+	release chan struct{}
+	started chan struct{}
+}
+
+func (d *blockingDialer) Dial(cid, port uint32) (net.Conn, error) {
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+	<-d.release
+	return nil, errors.New("blockingDialer: released")
+}
+
+// TestShutdownCancelsPendingUpstreamDial verifies that Shutdown's grace
+// window bounds time spent waiting on an outstanding vsock Dial. The
+// blockingDialer never returns on its own, so the only way the handle
+// goroutine can exit within the shutdown grace is for Shutdown to cancel
+// the dial via dialCtx.
+func TestShutdownCancelsPendingUpstreamDial(t *testing.T) {
+	dialer := &blockingDialer{
+		release: make(chan struct{}),
+		started: make(chan struct{}, 1),
+	}
+	defer close(dialer.release)
+
+	m := metrics.New()
+	ephemeralPort := func() int {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		p := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		return p
+	}()
+	s, err := NewServer(
+		[]config.InboundListener{{
+			Bind: "127.0.0.1",
+			Port: ephemeralPort,
+			Mode: config.ModeHTTPHost,
+			Routes: []config.Route{
+				{Hostname: "x", CID: 16, VsockPort: 1},
+			},
+		}},
+		dialer, m, discardLogger(),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", ephemeralPort)
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close()
+	_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+
+	select {
+	case <-dialer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blockingDialer.Dial was never called")
+	}
+
+	grace := 200 * time.Millisecond
+	sctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	start := time.Now()
+	err = s.Shutdown(sctx)
+	dur := time.Since(start)
+
+	if dur > grace+2*time.Second {
+		t.Errorf("Shutdown took %v; dial was not cancelled within grace", dur)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Shutdown err = %v; want context.DeadlineExceeded", err)
+	}
+}
+
 // counterDialer is a Dialer stub used by tests that must not actually dial.
 // When fail is true, every Dial returns an error; counts remain visible via
 // called() so tests can assert "dialer never touched".

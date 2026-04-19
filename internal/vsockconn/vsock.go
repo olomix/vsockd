@@ -54,3 +54,13 @@ type vsockConn struct {
 }
 
 func (v *vsockConn) PeerCID() uint32 { return v.peerCID }
+
+// CloseWrite shuts down the write side of the underlying *vsock.Conn so
+// the peer observes EOF while still being able to send remaining bytes.
+// Required by the proxy paths' half-close semantics.
+func (v *vsockConn) CloseWrite() error {
+	if cw, ok := v.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return v.Conn.Close()
+}

@@ -663,3 +663,158 @@ shutdown_grace: 2s
 	}
 	_ = c.Close()
 }
+
+// TestInboundPreservesResponseAfterHalfClose exercises the half-close
+// path: the client finishes its request and then CloseWrite()s, expecting
+// the response to still flow back. If the proxy full-closes upstream when
+// the client→upstream side reaches EOF, the enclave cannot write its
+// response and the client reads zero bytes.
+func TestInboundPreservesResponseAfterHalfClose(t *testing.T) {
+	inPort := allocPort(t)
+	body := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	_, reg, _ := startApp(t, body, "")
+
+	ln, err := vsockconn.ListenLoopback(reg, 16, 8080)
+	if err != nil {
+		t.Fatalf("ListenLoopback: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		// Drain everything the client sent; returns when half-close
+		// propagates through the proxy and we observe EOF on our side.
+		_, _ = io.Copy(io.Discard, c)
+		resp := "HTTP/1.1 200 OK\r\n" +
+			"Content-Length: 2\r\nConnection: close\r\n\r\nok"
+		_, _ = c.Write([]byte(resp))
+	}()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", inPort)
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer raw.Close()
+	tcp := raw.(*net.TCPConn)
+
+	req := "GET / HTTP/1.1\r\n" +
+		"Host: api.example.com\r\nConnection: close\r\n\r\n"
+	if _, err := tcp.Write([]byte(req)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := tcp.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	_ = tcp.SetReadDeadline(time.Now().Add(3 * time.Second))
+	b, err := io.ReadAll(tcp)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !strings.Contains(string(b), "200 OK") {
+		t.Errorf("response missing after half-close; got %q", string(b))
+	}
+}
+
+// TestReloadAtomicAcrossSubsystems proves that a failure to bind a new
+// outbound listener does not leave the inbound side in a half-reconfigured
+// state. The test pre-grabs the outbound vsock port that the updated
+// config tries to add, so outbound PrepareApply fails; the inbound change
+// in the same config must be rolled back, not committed.
+func TestReloadAtomicAcrossSubsystems(t *testing.T) {
+	inPort := allocPort(t)
+	const outPortOld uint32 = 9100
+	const outPortNew uint32 = 9101
+	newInPort := allocPort(t)
+
+	initial := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+outbound:
+  - port: %d
+    cids:
+      - cid: 16
+        allowed_hosts: ["*"]
+shutdown_grace: 1s
+`, inPort, outPortOld)
+	a, reg, cfgPath := startApp(t, initial, "")
+
+	// Reserve outPortNew in the shared registry so the app's outbound
+	// PrepareApply call on this port returns "already registered". The
+	// loopback listen closure uses cid 0.
+	blocker, err := vsockconn.ListenLoopback(reg, 0, outPortNew)
+	if err != nil {
+		t.Fatalf("pre-bind outPortNew: %v", err)
+	}
+	defer blocker.Close()
+
+	updated := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+outbound:
+  - port: %d
+    cids:
+      - cid: 16
+        allowed_hosts: ["*"]
+shutdown_grace: 1s
+`, newInPort, outPortNew)
+	if err := os.WriteFile(cfgPath, []byte(updated), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := a.Reload(); err == nil {
+		t.Fatal("Reload with outbound bind conflict returned nil, want error")
+	}
+
+	keys := a.Inbound().ListenerKeys()
+	if len(keys) != 1 || !strings.Contains(keys[0], fmt.Sprint(inPort)) {
+		t.Fatalf("inbound listener changed after failed reload: %v", keys)
+	}
+	newAddr := fmt.Sprintf("127.0.0.1:%d", newInPort)
+	if c, err := net.DialTimeout("tcp", newAddr, 200*time.Millisecond); err == nil {
+		_ = c.Close()
+		t.Fatalf("inbound port %d bound despite rolled-back reload", newInPort)
+	}
+	oldAddr := fmt.Sprintf("127.0.0.1:%d", inPort)
+	c, err := net.DialTimeout("tcp", oldAddr, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("original inbound port %d unreachable: %v", inPort, err)
+	}
+	_ = c.Close()
+
+	ports := a.Outbound().ListenerPorts()
+	if len(ports) != 1 || ports[0] != outPortOld {
+		t.Fatalf("outbound ports = %v, want [%d]", ports, outPortOld)
+	}
+
+	if v := counterValue(t, a.Metrics(), "config_reloads_total",
+		map[string]string{"result": "failure"}); v != 1 {
+		t.Errorf("config_reloads_total{failure} = %v, want 1", v)
+	}
+}

@@ -68,6 +68,16 @@ type loopbackConn struct {
 
 func (c *loopbackConn) PeerCID() uint32 { return c.peerCID }
 
+// CloseWrite forwards to the underlying net.Conn's CloseWrite when it
+// supports one (TCP does). Exposed because the proxy paths rely on a
+// half-close to preserve response flow after the client finishes sending.
+func (c *loopbackConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
 type loopbackDialer struct {
 	registry  *Registry
 	sourceCID uint32

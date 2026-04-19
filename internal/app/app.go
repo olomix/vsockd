@@ -172,6 +172,13 @@ func (a *App) Start(ctx context.Context) error {
 // running configuration unchanged and returns the error; a successful
 // reload replaces currentCfg atomically. Either way, the config_reloads
 // counter is incremented.
+//
+// The diff is staged through both subsystems before anything is committed:
+// we bind every new listener first (phase 1 on inbound, then outbound),
+// and only commit the swap once both subsystems have validated and bound
+// successfully. If outbound's phase 1 fails, inbound's pending plan is
+// aborted (its newly bound sockets are released) before returning. This
+// keeps the daemon's observable state atomic across the two subsystems.
 func (a *App) Reload() error {
 	a.reloadMu.Lock()
 	defer a.reloadMu.Unlock()
@@ -184,18 +191,23 @@ func (a *App) Reload() error {
 			"path", a.opts.ConfigPath, "err", err)
 		return err
 	}
-	if err := a.inbound.Apply(cfg.Inbound); err != nil {
+	inPlan, err := a.inbound.PrepareApply(cfg.Inbound)
+	if err != nil {
 		a.metric.ConfigReloads.
 			WithLabelValues(metrics.ReloadResultFailure).Inc()
 		a.opts.Logger.Error("inbound reload failed", "err", err)
 		return err
 	}
-	if err := a.out.Apply(cfg.Outbound); err != nil {
+	outPlan, err := a.out.PrepareApply(cfg.Outbound)
+	if err != nil {
+		inPlan.AbortApply()
 		a.metric.ConfigReloads.
 			WithLabelValues(metrics.ReloadResultFailure).Inc()
 		a.opts.Logger.Error("outbound reload failed", "err", err)
 		return err
 	}
+	inPlan.CommitApply()
+	outPlan.CommitApply()
 	a.currentCfg = cfg
 	a.metric.ConfigReloads.
 		WithLabelValues(metrics.ReloadResultSuccess).Inc()
