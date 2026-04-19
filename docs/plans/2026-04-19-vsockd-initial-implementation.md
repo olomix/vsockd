@@ -332,8 +332,8 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 15: Documentation polish
 
-- [ ] cross-check README against final config shape (names may have drifted)
-- [ ] add CHANGELOG.md with a v0.1.0 entry
+- [x] cross-check README against final config shape (names may have drifted)
+- [x] add CHANGELOG.md with a v0.1.0 entry
 
 ## Technical Details
 
