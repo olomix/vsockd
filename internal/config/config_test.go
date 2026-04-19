@@ -124,6 +124,23 @@ outbound:
 			want: "already listed under outbound port 8080",
 		},
 		{
+			name: "duplicate inbound (bind, port)",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 443
+    mode: tls-sni
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8443}
+  - bind: 0.0.0.0
+    port: 443
+    mode: http-host
+    routes:
+      - {hostname: b.example.com, cid: 4, vsock_port: 8080}
+`,
+			want: "duplicate bind 0.0.0.0:443",
+		},
+		{
 			name: "duplicate hostname in inbound listener (case-insensitive)",
 			yaml: `
 inbound:

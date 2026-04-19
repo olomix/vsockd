@@ -544,9 +544,10 @@ func (l *listener) handleProxy(
 	// framing (no need to re-read after the first response body).
 	req.Close = true
 
-	l.server.metric.OutboundConnections.
-		WithLabelValues(cidLabel, metrics.OutboundResultAllowed).Inc()
-
+	// Each connection contributes exactly one outbound_connections_total
+	// event: "allowed" on full success, "error" on any mid-request failure.
+	// The counter is incremented at the sole success return below to match
+	// the CONNECT path's semantics.
 	upCount := &countingWriter{W: upstream}
 	if err := req.Write(upCount); err != nil {
 		l.server.metric.OutboundConnections.
@@ -572,13 +573,17 @@ func (l *listener) handleProxy(
 	resp.Close = true
 
 	downCount := &countingWriter{W: c}
-	if werr := resp.Write(downCount); werr != nil {
-		l.server.metric.OutboundConnections.
-			WithLabelValues(cidLabel, metrics.OutboundResultError).Inc()
-	}
+	werr := resp.Write(downCount)
 	l.server.metric.OutboundBytes.
 		WithLabelValues(cidLabel, metrics.DirectionIn).
 		Add(float64(downCount.N))
+	if werr != nil {
+		l.server.metric.OutboundConnections.
+			WithLabelValues(cidLabel, metrics.OutboundResultError).Inc()
+		return
+	}
+	l.server.metric.OutboundConnections.
+		WithLabelValues(cidLabel, metrics.OutboundResultAllowed).Inc()
 }
 
 // tunnel runs the bidirectional copy for a CONNECT tunnel. Each direction

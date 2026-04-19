@@ -127,10 +127,22 @@ func (c *Config) Validate() error {
 		return errors.New("config has no inbound or outbound listeners")
 	}
 
+	// Two listeners sharing the same (bind, port) would collide at bind time
+	// on first Start, and silently collapse during SIGHUP reloads where the
+	// Apply keyed-existing-listener fast path treats duplicate keys as the
+	// same listener.
+	seenBind := make(map[string]int)
 	for i := range c.Inbound {
 		if err := c.Inbound[i].validate(); err != nil {
 			return fmt.Errorf("inbound[%d]: %w", i, err)
 		}
+		key := fmt.Sprintf("%s|%d", c.Inbound[i].Bind, c.Inbound[i].Port)
+		if prev, ok := seenBind[key]; ok {
+			return fmt.Errorf(
+				"inbound[%d]: duplicate bind %s:%d already declared in inbound[%d]",
+				i, c.Inbound[i].Bind, c.Inbound[i].Port, prev)
+		}
+		seenBind[key] = i
 	}
 
 	// Cross-port uniqueness: a CID may appear under at most one outbound port.
