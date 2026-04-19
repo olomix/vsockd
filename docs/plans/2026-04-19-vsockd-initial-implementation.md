@@ -282,7 +282,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 11: End-to-end integration smoke test
 
-- [ ] in `test/e2e/` (or `internal/integration/`) write a test that uses
+- [x] in `test/e2e/` (or `internal/integration/`) write a test that uses
       the loopback-vsock backend to run a full scenario:
   - spin up fake "enclave" that listens on loopback vsock + speaks HTTP
   - start `vsockd` in-process with a generated config
@@ -291,7 +291,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
   - outbound path: fake enclave dials loopback vsock, issues CONNECT to an
     allowed host → succeeds; issues CONNECT to a disallowed host → 403
   - SIGHUP reload adds a new route → new inbound TCP dial works
-- [ ] run `go test ./test/e2e/...` — must pass before next task
+- [x] run `go test ./test/e2e/...` — must pass before next task
 
 ### Task 12: Dockerfile and example config
 
