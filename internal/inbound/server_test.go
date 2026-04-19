@@ -668,6 +668,60 @@ func TestServerBindConflict(t *testing.T) {
 	}
 }
 
+// TestApplyModeChangeSameAddrReturnsClearError verifies that swapping the
+// sniff mode on an already-bound bind:port is rejected with a descriptive
+// error rather than bubbling up a confusing EADDRINUSE from net.Listen —
+// and that the running listener stays intact when the reload is refused.
+func TestApplyModeChangeSameAddrReturnsClearError(t *testing.T) {
+	port := func() int {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		p := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		return p
+	}()
+
+	m := metrics.New()
+	cfg := []config.InboundListener{{
+		Bind: "127.0.0.1",
+		Port: port,
+		Mode: config.ModeHTTPHost,
+		Routes: []config.Route{
+			{Hostname: "x", CID: 16, VsockPort: 1},
+		},
+	}}
+	s := startServer(t, cfg, vsockconn.NewLoopbackDialer(vsockconn.NewRegistry(), 2), m)
+
+	updated := []config.InboundListener{{
+		Bind: "127.0.0.1",
+		Port: port,
+		Mode: config.ModeTLSSNI,
+		Routes: []config.Route{
+			{Hostname: "x", CID: 16, VsockPort: 1},
+		},
+	}}
+	err := s.Apply(updated)
+	if err == nil {
+		t.Fatal("Apply with changed mode returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "cannot change mode") {
+		t.Fatalf("Apply error = %q; want mention of mode change", err.Error())
+	}
+
+	// Running listener must stay on the original mode.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.listeners) != 1 {
+		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
+	}
+	if s.listeners[0].cfg.Mode != config.ModeHTTPHost {
+		t.Fatalf("listener mode = %q; want original %q preserved",
+			s.listeners[0].cfg.Mode, config.ModeHTTPHost)
+	}
+}
+
 // counterDialer is a Dialer stub used by tests that must not actually dial.
 // When fail is true, every Dial returns an error; counts remain visible via
 // called() so tests can assert "dialer never touched".

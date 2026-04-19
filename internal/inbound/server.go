@@ -160,8 +160,14 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 
 	// Index current listeners by key so we can diff in O(n).
 	existing := make(map[string]*listener, len(s.listeners))
+	// existingByAddr lets us detect mode changes on an already-bound
+	// bind:port — a case the Apply path cannot handle atomically because
+	// the old listener still owns the TCP socket when Phase 1 tries to
+	// bind the new one.
+	existingByAddr := make(map[string]*listener, len(s.listeners))
 	for _, ln := range s.listeners {
 		existing[ln.key()] = ln
+		existingByAddr[ln.addr()] = ln
 	}
 
 	// Phase 1: construct all listeners, bind new ones, and record the
@@ -199,6 +205,16 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 			kept[k] = true
 			next = append(next, cur)
 			continue
+		}
+		// Same bind:port with a different mode: the old listener still
+		// owns the TCP socket, so net.Listen would fail with EADDRINUSE.
+		// Surface a clear error instead of that confusing system message;
+		// the operator can restart the daemon to apply the mode change.
+		if cur, addrMatch := existingByAddr[newLn.addr()]; addrMatch {
+			cleanup()
+			return fmt.Errorf(
+				"inbound[%d]: cannot change mode on %s from %q to %q at runtime; restart required",
+				i, newLn.addr(), cur.cfg.Mode, newLn.cfg.Mode)
 		}
 		if err := newLn.bind(); err != nil {
 			cleanup()
