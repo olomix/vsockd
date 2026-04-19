@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olomix/vsockd/internal/allowlist"
@@ -53,7 +54,10 @@ type Server struct {
 	metric     *metrics.Metrics
 	logger     *slog.Logger
 
+	// mu guards the listeners slice plus the accept-loop context.
+	mu        sync.Mutex
 	listeners []*listener
+	ctx       context.Context
 
 	// activeConn tracks every connection (vsock accept side plus any
 	// upstream TCP dial) so Shutdown can force-close them when its grace
@@ -103,16 +107,34 @@ func NewServer(
 // Addr returns the bound address of the i-th configured listener, or nil
 // if the index is out of range or Start has not yet been called.
 func (s *Server) Addr(i int) net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if i < 0 || i >= len(s.listeners) || s.listeners[i].ln == nil {
 		return nil
 	}
 	return s.listeners[i].ln.Addr()
 }
 
+// ListenerPorts returns the set of currently-active outbound vsock ports in
+// their configured order. Exposed for tests and reload sanity checks.
+func (s *Server) ListenerPorts() []uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]uint32, 0, len(s.listeners))
+	for _, ln := range s.listeners {
+		out = append(out, ln.cfg.Port)
+	}
+	return out
+}
+
 // Start binds every listener and launches an accept loop per listener. If
 // any bind fails, listeners already bound are closed and the error is
 // returned to the caller.
 func (s *Server) Start(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ctx = ctx
 	for _, ln := range s.listeners {
 		if err := ln.bind(); err != nil {
 			for _, other := range s.listeners {
@@ -131,13 +153,71 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// Apply reconciles the running outbound listeners with the supplied
+// configuration. Listeners whose port matches an existing one keep their
+// vsock listener alive and atomically swap their per-CID allowlist table;
+// listeners that disappeared are closed; listeners that appeared are bound
+// and their accept loops spawned. Cross-port CID uniqueness is assumed to
+// have been checked by config.Validate before this is called.
+func (s *Server) Apply(cfgs []config.OutboundListener) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil {
+		return errors.New("outbound: Apply called before Start")
+	}
+
+	existing := make(map[uint32]*listener, len(s.listeners))
+	for _, ln := range s.listeners {
+		existing[ln.cfg.Port] = ln
+	}
+
+	kept := make(map[uint32]bool, len(cfgs))
+	var next []*listener
+
+	for i := range cfgs {
+		cfg := cfgs[i]
+		newLn, err := newListener(cfg, s)
+		if err != nil {
+			return fmt.Errorf("outbound[%d]: %w", i, err)
+		}
+		if cur, ok := existing[cfg.Port]; ok {
+			// Port alone keys the listener; updating cur.cfg would race
+			// with the accept-loop reader. Swap only the matcher table.
+			cur.replaceMatchers(newLn.matchersSnapshot())
+			kept[cfg.Port] = true
+			next = append(next, cur)
+			continue
+		}
+		if err := newLn.bind(); err != nil {
+			return err
+		}
+		s.wg.Add(1)
+		go func(l *listener) {
+			defer s.wg.Done()
+			l.run(s.ctx)
+		}(newLn)
+		next = append(next, newLn)
+	}
+
+	for port, ln := range existing {
+		if !kept[port] {
+			ln.close()
+		}
+	}
+	s.listeners = next
+	return nil
+}
+
 // Shutdown stops every accept loop and waits for in-flight proxy
 // goroutines to drain. If ctx expires first, remaining tracked connections
 // are force-closed and ctx.Err() is returned.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
 	for _, ln := range s.listeners {
 		ln.close()
 	}
+	s.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -176,10 +256,10 @@ type listener struct {
 
 	ln vsockconn.Listener
 
-	// matchers maps authorized peer CID to its compiled allowlist. A peer
-	// CID absent from this map is denied at accept time before any bytes
-	// are read.
-	matchers map[uint32]*allowlist.Matcher
+	// matchers holds the authorized-CID → compiled allowlist table. Stored
+	// as an atomic pointer so Apply can swap the whole table at reload
+	// time without disturbing in-flight connections.
+	matchers atomic.Pointer[map[uint32]*allowlist.Matcher]
 }
 
 func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
@@ -199,7 +279,21 @@ func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
 		}
 		matchers[oc.CID] = m
 	}
-	return &listener{cfg: cfg, server: s, matchers: matchers}, nil
+	l := &listener{cfg: cfg, server: s}
+	l.matchers.Store(&matchers)
+	return l, nil
+}
+
+func (l *listener) matchersSnapshot() map[uint32]*allowlist.Matcher {
+	p := l.matchers.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func (l *listener) replaceMatchers(m map[uint32]*allowlist.Matcher) {
+	l.matchers.Store(&m)
 }
 
 func (l *listener) bind() error {
@@ -243,7 +337,8 @@ func (l *listener) handle(ctx context.Context, c vsockconn.Conn) {
 
 	cid := c.PeerCID()
 	cidLabel := metrics.FormatCID(cid)
-	matcher, ok := l.matchers[cid]
+	matchers := l.matchersSnapshot()
+	matcher, ok := matchers[cid]
 	if !ok {
 		l.server.metric.OutboundConnections.
 			WithLabelValues(cidLabel, metrics.OutboundResultDenied).Inc()

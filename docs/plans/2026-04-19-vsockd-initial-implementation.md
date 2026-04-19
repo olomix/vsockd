@@ -256,29 +256,29 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 10: Main wiring, signals, reload, graceful shutdown
 
-- [ ] wire `cmd/vsockd/main.go`:
+- [x] wire `cmd/vsockd/main.go`:
   - flags: `-config`, `-metrics-addr` (default `:9090`)
   - load config, construct `Metrics`, build inbound + outbound servers,
     start all with a shared `context.Context`
-- [ ] `SIGHUP` handler:
+- [x] `SIGHUP` handler:
   - reload config from disk, validate
   - diff: close listeners that disappeared, start listeners that appeared,
     update per-route/CID tables under a mutex
   - **existing connections continue to use the rules they started with**
     (simplest correct behaviour; document it)
   - increment `config_reloads_total{result="success"|"failure"}`
-- [ ] `SIGTERM`/`SIGINT` handler: stop all listeners, cancel context,
+- [x] `SIGTERM`/`SIGINT` handler: stop all listeners, cancel context,
       wait for active connections up to `shutdown-grace` (default 30s),
       then force-close remaining
-- [ ] structured logging everywhere via `slog`; JSON handler by default,
+- [x] structured logging everywhere via `slog`; JSON handler by default,
       text handler when stderr is a TTY (use `-log-format` flag)
-- [ ] write tests:
+- [x] write tests:
   - start binary in-process with a minimal config, hit `/metrics`, assert
     200 and expected metric names present
   - SIGHUP reload: change config on disk, send SIGHUP, verify new listener
     appears and a removed one is gone; existing conn survives
   - SIGTERM: verify graceful shutdown within grace window
-- [ ] run `go test ./...` — must pass before next task
+- [x] run `go test ./...` — must pass before next task
 
 ### Task 11: End-to-end integration smoke test
 

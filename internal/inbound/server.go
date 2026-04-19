@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olomix/vsockd/internal/config"
@@ -35,7 +36,12 @@ type Server struct {
 	metric *metrics.Metrics
 	logger *slog.Logger
 
+	// mu guards the listeners slice plus the accept-loop context. Accept
+	// loops themselves hold no lock, so the mutex is only contended during
+	// Start / Apply / Shutdown — never on the hot path.
+	mu        sync.Mutex
 	listeners []*listener
+	ctx       context.Context
 
 	// activeConn tracks every in-flight connection (both client-side and
 	// upstream) so Shutdown can force-close them if the grace deadline
@@ -83,6 +89,8 @@ func NewServer(
 // if the index is out of range or the listener has not been bound yet. Useful
 // for tests that need the ephemeral port.
 func (s *Server) Addr(i int) net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if i < 0 || i >= len(s.listeners) {
 		return nil
 	}
@@ -92,11 +100,28 @@ func (s *Server) Addr(i int) net.Addr {
 	return s.listeners[i].tcp.Addr()
 }
 
+// ListenerKeys returns the (bind:port) strings of currently active
+// listeners, in their configured order. Exposed for tests and for the
+// reload path to verify a diff was applied.
+func (s *Server) ListenerKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.listeners))
+	for _, ln := range s.listeners {
+		out = append(out, ln.addr())
+	}
+	return out
+}
+
 // Start binds every listener and launches an accept loop per listener. It
 // does not block — callers wait on the context to know when to call
 // Shutdown. If any bind fails, listeners already bound are closed and the
 // error is returned.
 func (s *Server) Start(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ctx = ctx
 	for _, ln := range s.listeners {
 		if err := ln.bind(); err != nil {
 			for _, other := range s.listeners {
@@ -115,14 +140,81 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// Apply reconciles the running listeners with the supplied configuration.
+// Listeners whose (bind, port, mode) key matches an existing one keep their
+// TCP listener alive but atomically swap their route table so that already
+// in-flight connections continue with the rules they started on while new
+// connections immediately see the new rules. Listeners that disappeared are
+// closed; listeners that appeared are bound and their accept loops spawned.
+//
+// Apply returns the first error encountered while binding new listeners.
+// Any listeners that were closed as part of the diff stay closed even on
+// error (the caller should drop the reload and inspect the error).
+func (s *Server) Apply(cfgs []config.InboundListener) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil {
+		return errors.New("inbound: Apply called before Start")
+	}
+
+	// Index current listeners by key so we can diff in O(n).
+	existing := make(map[string]*listener, len(s.listeners))
+	for _, ln := range s.listeners {
+		existing[ln.key()] = ln
+	}
+
+	kept := make(map[string]bool, len(cfgs))
+	var next []*listener
+
+	for i := range cfgs {
+		cfg := cfgs[i]
+		newLn, err := newListener(cfg, s)
+		if err != nil {
+			return fmt.Errorf("inbound[%d]: %w", i, err)
+		}
+		k := newLn.key()
+		if cur, ok := existing[k]; ok {
+			// Key covers Bind, Port, and Mode — the only cfg fields the
+			// handle path reads — so we only need to swap the routes map.
+			// Leaving cur.cfg alone avoids a data race with accept-loop
+			// readers that don't take the server's mu.
+			cur.replaceRoutes(newLn.routesSnapshot())
+			kept[k] = true
+			next = append(next, cur)
+			continue
+		}
+		if err := newLn.bind(); err != nil {
+			return err
+		}
+		s.wg.Add(1)
+		go func(l *listener) {
+			defer s.wg.Done()
+			l.run(s.ctx)
+		}(newLn)
+		next = append(next, newLn)
+	}
+
+	// Close listeners that disappeared from the config.
+	for k, ln := range existing {
+		if !kept[k] {
+			ln.close()
+		}
+	}
+	s.listeners = next
+	return nil
+}
+
 // Shutdown stops every accept loop and waits for in-flight proxy goroutines
 // to drain. If ctx expires first, remaining connections are force-closed and
 // ctx.Err() is returned; callers can still Wait on the Server to observe the
 // forced teardown.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
 	for _, ln := range s.listeners {
 		ln.close()
 	}
+	s.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -162,9 +254,11 @@ type listener struct {
 	server *Server
 	tcp    net.Listener
 
-	// routes maps lower-cased hostname to the configured Route. Lookup at
-	// accept time is a single hash probe.
-	routes map[string]config.Route
+	// routes holds the lowercase-hostname → Route map. Stored as an atomic
+	// pointer so Apply can swap the whole table without blocking the hot
+	// path, and in-flight connections keep a stable reference to the map
+	// they observed at accept time.
+	routes atomic.Pointer[map[string]config.Route]
 }
 
 func newListener(cfg config.InboundListener, s *Server) (*listener, error) {
@@ -173,11 +267,37 @@ func newListener(cfg config.InboundListener, s *Server) (*listener, error) {
 	default:
 		return nil, fmt.Errorf("unknown mode %q", cfg.Mode)
 	}
-	routes := make(map[string]config.Route, len(cfg.Routes))
-	for _, r := range cfg.Routes {
-		routes[strings.ToLower(r.Hostname)] = r
+	l := &listener{cfg: cfg, server: s}
+	rm := buildRouteMap(cfg.Routes)
+	l.routes.Store(&rm)
+	return l, nil
+}
+
+func buildRouteMap(rs []config.Route) map[string]config.Route {
+	out := make(map[string]config.Route, len(rs))
+	for _, r := range rs {
+		out[strings.ToLower(r.Hostname)] = r
 	}
-	return &listener{cfg: cfg, server: s, routes: routes}, nil
+	return out
+}
+
+func (l *listener) routesSnapshot() map[string]config.Route {
+	p := l.routes.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func (l *listener) replaceRoutes(rm map[string]config.Route) {
+	l.routes.Store(&rm)
+}
+
+// key identifies a listener for reload diffing. Mode is part of the key:
+// changing the sniff mode on the same (bind, port) semantically creates a
+// new listener (different protocol) even though the TCP address is shared.
+func (l *listener) key() string {
+	return fmt.Sprintf("%s|%s", l.addr(), l.cfg.Mode)
 }
 
 func (l *listener) addr() string {
@@ -236,7 +356,8 @@ func (l *listener) handle(ctx context.Context, c net.Conn) {
 		return
 	}
 
-	route, ok := l.routes[host]
+	routes := l.routesSnapshot()
+	route, ok := routes[host]
 	if !ok {
 		l.server.metric.InboundErrors.
 			WithLabelValues(routeLabelUnknown, metrics.InboundErrorRoute).Inc()
