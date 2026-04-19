@@ -206,9 +206,9 @@ func (a *App) Reload() error {
 	return nil
 }
 
-// Shutdown stops every subsystem. It enforces the grace window by sharing
-// a deadline across inbound, outbound, and the metrics HTTP server. After
-// the grace period elapses, remaining connections are force-closed.
+// Shutdown stops every subsystem. Inbound, outbound, and the metrics HTTP
+// server each get the full grace window (they run concurrently, not in
+// series) after which any remaining connections are force-closed.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.reloadMu.Lock()
 	defer a.reloadMu.Unlock()
@@ -219,27 +219,62 @@ func (a *App) Shutdown(ctx context.Context) error {
 
 	a.opts.Logger.Info("vsockd shutting down", "grace", grace)
 
-	var firstErr error
-	if err := a.inbound.Shutdown(shutdownCtx); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("inbound shutdown: %w", err)
-	}
-	if err := a.out.Shutdown(shutdownCtx); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("outbound shutdown: %w", err)
-	}
-	if a.metricsStop != nil {
-		a.metricsStop()
-		// If shutdownCtx expires while metrics is still draining in-flight
-		// scrapes, force the listener closed so srv.Serve returns and the
-		// goroutine exits instead of blocking the process past the grace
-		// window (e.g. systemd's TimeoutStopSec).
-		select {
-		case <-a.metricsDone:
-		case <-shutdownCtx.Done():
-			_ = a.metricsLn.Close()
-			<-a.metricsDone
+	// Run the three shutdowns concurrently so a slow inbound drain does not
+	// starve outbound or metrics of their share of the grace window.
+	var (
+		wg                  sync.WaitGroup
+		errMu               sync.Mutex
+		inErr, outErr, mErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := a.inbound.Shutdown(shutdownCtx); err != nil {
+			errMu.Lock()
+			inErr = err
+			errMu.Unlock()
 		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := a.out.Shutdown(shutdownCtx); err != nil {
+			errMu.Lock()
+			outErr = err
+			errMu.Unlock()
+		}
+	}()
+	if a.metricsStop != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.metricsStop()
+			// If shutdownCtx expires while metrics is still draining
+			// in-flight scrapes, force the listener closed so srv.Serve
+			// returns and the goroutine exits instead of blocking the
+			// process past the grace window (e.g. systemd's
+			// TimeoutStopSec).
+			select {
+			case <-a.metricsDone:
+			case <-shutdownCtx.Done():
+				_ = a.metricsLn.Close()
+				<-a.metricsDone
+				errMu.Lock()
+				mErr = shutdownCtx.Err()
+				errMu.Unlock()
+			}
+		}()
 	}
-	return firstErr
+	wg.Wait()
+
+	switch {
+	case inErr != nil:
+		return fmt.Errorf("inbound shutdown: %w", inErr)
+	case outErr != nil:
+		return fmt.Errorf("outbound shutdown: %w", outErr)
+	case mErr != nil:
+		return fmt.Errorf("metrics shutdown: %w", mErr)
+	}
+	return nil
 }
 
 func (a *App) grace() time.Duration {

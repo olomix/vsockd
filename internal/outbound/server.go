@@ -339,16 +339,34 @@ func (l *listener) close() {
 }
 
 func (l *listener) run(ctx context.Context) {
+	// Match net/http.Server.Serve's back-off on temporary Accept errors:
+	// under FD exhaustion (EMFILE/ENFILE) the loop would otherwise pin a
+	// CPU core and flood the log with warn-level events.
+	var tempDelay time.Duration
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else {
+				tempDelay *= 2
+			}
+			if tempDelay > time.Second {
+				tempDelay = time.Second
+			}
 			l.server.logger.Warn("outbound accept error",
-				"port", l.cfg.Port, "err", err)
+				"port", l.cfg.Port, "err", err, "retry_in", tempDelay)
+			select {
+			case <-time.After(tempDelay):
+			case <-ctx.Done():
+				return
+			}
 			continue
 		}
+		tempDelay = 0
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
