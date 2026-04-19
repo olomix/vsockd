@@ -147,9 +147,9 @@ func (s *Server) Start(ctx context.Context) error {
 // connections immediately see the new rules. Listeners that disappeared are
 // closed; listeners that appeared are bound and their accept loops spawned.
 //
-// Apply returns the first error encountered while binding new listeners.
-// Any listeners that were closed as part of the diff stay closed even on
-// error (the caller should drop the reload and inspect the error).
+// Apply is atomic: if any validation or bind fails, no running listener is
+// mutated and any listener bound during this call is closed before the
+// error is returned.
 func (s *Server) Apply(cfgs []config.InboundListener) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -164,13 +164,29 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 		existing[ln.key()] = ln
 	}
 
+	// Phase 1: construct all listeners, bind new ones, and record the
+	// route swaps to apply to kept listeners. Nothing observable changes
+	// in this phase; a failure closes any just-bound sockets and leaves
+	// the running state unchanged.
+	type pendingSwap struct {
+		listener *listener
+		routes   map[string]config.Route
+	}
 	kept := make(map[string]bool, len(cfgs))
-	var next []*listener
+	next := make([]*listener, 0, len(cfgs))
+	var swaps []pendingSwap
+	var newBinds []*listener
+	cleanup := func() {
+		for _, ln := range newBinds {
+			ln.close()
+		}
+	}
 
 	for i := range cfgs {
 		cfg := cfgs[i]
 		newLn, err := newListener(cfg, s)
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("inbound[%d]: %w", i, err)
 		}
 		k := newLn.key()
@@ -179,22 +195,30 @@ func (s *Server) Apply(cfgs []config.InboundListener) error {
 			// handle path reads — so we only need to swap the routes map.
 			// Leaving cur.cfg alone avoids a data race with accept-loop
 			// readers that don't take the server's mu.
-			cur.replaceRoutes(newLn.routesSnapshot())
+			swaps = append(swaps, pendingSwap{cur, newLn.routesSnapshot()})
 			kept[k] = true
 			next = append(next, cur)
 			continue
 		}
 		if err := newLn.bind(); err != nil {
+			cleanup()
 			return err
 		}
+		newBinds = append(newBinds, newLn)
+		next = append(next, newLn)
+	}
+
+	// Phase 2: commit. No failure path remains past this point.
+	for _, sw := range swaps {
+		sw.listener.replaceRoutes(sw.routes)
+	}
+	for _, ln := range newBinds {
 		s.wg.Add(1)
 		go func(l *listener) {
 			defer s.wg.Done()
 			l.run(s.ctx)
-		}(newLn)
-		next = append(next, newLn)
+		}(ln)
 	}
-
 	// Close listeners that disappeared from the config.
 	for k, ln := range existing {
 		if !kept[k] {

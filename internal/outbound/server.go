@@ -159,6 +159,10 @@ func (s *Server) Start(ctx context.Context) error {
 // listeners that disappeared are closed; listeners that appeared are bound
 // and their accept loops spawned. Cross-port CID uniqueness is assumed to
 // have been checked by config.Validate before this is called.
+//
+// Apply is atomic: if any validation or bind fails, no running listener is
+// mutated and any listener bound during this call is closed before the
+// error is returned.
 func (s *Server) Apply(cfgs []config.OutboundListener) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,34 +176,57 @@ func (s *Server) Apply(cfgs []config.OutboundListener) error {
 		existing[ln.cfg.Port] = ln
 	}
 
+	// Phase 1: construct all listeners, bind new ones, and record matcher
+	// swaps for kept ones. A failure here closes any just-bound sockets
+	// and leaves the running state unchanged.
+	type pendingSwap struct {
+		listener *listener
+		matchers map[uint32]*allowlist.Matcher
+	}
 	kept := make(map[uint32]bool, len(cfgs))
-	var next []*listener
+	next := make([]*listener, 0, len(cfgs))
+	var swaps []pendingSwap
+	var newBinds []*listener
+	cleanup := func() {
+		for _, ln := range newBinds {
+			ln.close()
+		}
+	}
 
 	for i := range cfgs {
 		cfg := cfgs[i]
 		newLn, err := newListener(cfg, s)
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("outbound[%d]: %w", i, err)
 		}
 		if cur, ok := existing[cfg.Port]; ok {
 			// Port alone keys the listener; updating cur.cfg would race
 			// with the accept-loop reader. Swap only the matcher table.
-			cur.replaceMatchers(newLn.matchersSnapshot())
+			swaps = append(swaps, pendingSwap{cur, newLn.matchersSnapshot()})
 			kept[cfg.Port] = true
 			next = append(next, cur)
 			continue
 		}
 		if err := newLn.bind(); err != nil {
+			cleanup()
 			return err
 		}
+		newBinds = append(newBinds, newLn)
+		next = append(next, newLn)
+	}
+
+	// Phase 2: commit. No failure path remains past this point.
+	for _, sw := range swaps {
+		sw.listener.replaceMatchers(sw.matchers)
+	}
+	for _, ln := range newBinds {
 		s.wg.Add(1)
 		go func(l *listener) {
 			defer s.wg.Done()
 			l.run(s.ctx)
-		}(newLn)
-		next = append(next, newLn)
+		}(ln)
 	}
-
 	for port, ln := range existing {
 		if !kept[port] {
 			ln.close()
@@ -336,16 +363,18 @@ func (l *listener) handle(ctx context.Context, c vsockconn.Conn) {
 	defer l.server.untrackConn(c)
 
 	cid := c.PeerCID()
-	cidLabel := metrics.FormatCID(cid)
 	matchers := l.matchersSnapshot()
 	matcher, ok := matchers[cid]
 	if !ok {
+		// Arbitrary peer CIDs must never become metric labels: unauthorized
+		// sources would otherwise let the cardinality grow without bound.
 		l.server.metric.OutboundConnections.
-			WithLabelValues(cidLabel, metrics.OutboundResultDenied).Inc()
+			WithLabelValues(metrics.CIDLabelUnauthorized, metrics.OutboundResultDenied).Inc()
 		l.server.logger.Warn("outbound peer cid not authorized for port",
 			"port", l.cfg.Port, "cid", cid)
 		return
 	}
+	cidLabel := metrics.FormatCID(cid)
 
 	_ = c.SetReadDeadline(time.Now().Add(headerReadTimeout))
 	br := bufio.NewReader(c)

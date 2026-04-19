@@ -34,6 +34,12 @@ const (
 	InboundErrorDial    = "dial"
 	InboundErrorCopy    = "copy"
 	InboundErrorAccept  = "accept"
+
+	// CIDLabelUnauthorized is emitted on outbound_connections_total in place
+	// of the raw peer CID when a connection is rejected because the CID is
+	// not configured on that port. Using a fixed value prevents arbitrary
+	// source CIDs from inflating metric cardinality.
+	CIDLabelUnauthorized = "unauthorized"
 )
 
 // Metrics groups every Prometheus collector exposed by vsockd. Construct via

@@ -135,6 +135,26 @@ func waitForCounter(
 		labels, want, counterValue(t, vec, labels...))
 }
 
+// waitForCounterNonZero polls until the counter's value is > 0 or the
+// deadline elapses. Use this when asserting byte-count metrics: the server
+// increments them after the response has been written, so a naive
+// counterValue check races against the test's resp.Body read.
+func waitForCounterNonZero(
+	t *testing.T,
+	vec *prometheus.CounterVec,
+	labels ...string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if counterValue(t, vec, labels...) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("counter %v stayed at 0 within deadline", labels)
+}
+
 // TestConnect_AllowedTunnels verifies an allowlisted CONNECT gets 200 and
 // bytes flow bidirectionally through the tunnel to a local echo server.
 func TestConnect_AllowedTunnels(t *testing.T) {
@@ -319,15 +339,12 @@ func TestProxy_AbsoluteURIGet(t *testing.T) {
 
 	waitForCounter(t, m.OutboundConnections, 1,
 		metrics.FormatCID(enclaveCID), metrics.OutboundResultAllowed)
-	// Non-zero byte counts in both directions.
-	if counterValue(t, m.OutboundBytes,
-		metrics.FormatCID(enclaveCID), metrics.DirectionOut) == 0 {
-		t.Error("DirectionOut byte counter is zero")
-	}
-	if counterValue(t, m.OutboundBytes,
-		metrics.FormatCID(enclaveCID), metrics.DirectionIn) == 0 {
-		t.Error("DirectionIn byte counter is zero")
-	}
+	// Non-zero byte counts in both directions. Poll to avoid racing the
+	// server's post-write counter increment.
+	waitForCounterNonZero(t, m.OutboundBytes,
+		metrics.FormatCID(enclaveCID), metrics.DirectionOut)
+	waitForCounterNonZero(t, m.OutboundBytes,
+		metrics.FormatCID(enclaveCID), metrics.DirectionIn)
 }
 
 // TestProxy_DeniedByAllowlist verifies absolute-URI GET to a disallowed
@@ -405,7 +422,12 @@ func TestWrongPeerCID_Closed(t *testing.T) {
 	}
 
 	waitForCounter(t, m.OutboundConnections, 1,
-		metrics.FormatCID(unknownCID), metrics.OutboundResultDenied)
+		metrics.CIDLabelUnauthorized, metrics.OutboundResultDenied)
+	// The unauthorized-CID label keeps metric cardinality bounded.
+	if v := counterValue(t, m.OutboundConnections,
+		metrics.FormatCID(unknownCID), metrics.OutboundResultDenied); v != 0 {
+		t.Errorf("raw unknownCID must not appear as a metric label, got %v", v)
+	}
 	// Counter for the legitimate CID must stay at zero.
 	if v := counterValue(t, m.OutboundConnections,
 		metrics.FormatCID(allowedCID),
@@ -605,7 +627,7 @@ func TestServer_MultiplePorts(t *testing.T) {
 		t.Errorf("expected close, got %d bytes", n)
 	}
 	waitForCounter(t, m.OutboundConnections, 1,
-		metrics.FormatCID(cidA), metrics.OutboundResultDenied)
+		metrics.CIDLabelUnauthorized, metrics.OutboundResultDenied)
 }
 
 // TestNewServerRejectsNilDependencies locks down the required arguments.

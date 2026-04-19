@@ -72,7 +72,9 @@ docker run --rm --network host \
 ```
 
 The image is built on `gcr.io/distroless/static-debian12:nonroot` and
-contains only the vsockd binary.
+contains only the vsockd binary. The image `EXPOSE`s port 9090 for
+`/metrics`; add `-p 9090:9090` (or change the listen address) when not
+running with `--network host`.
 
 ### systemd unit
 
@@ -226,9 +228,12 @@ registry — there is no global Prometheus state.
 | `outbound_bytes_total` | `cid`, `direction` | Bytes proxied outbound, by CID and direction. |
 | `config_reloads_total` | `result` | SIGHUP reload attempts; `result` is `success` or `failure`. |
 
-Label cardinality is bounded by the config: `route` is the hostname from the
-YAML, `cid` is a CID number already authorized in config. No user-supplied
-strings are ever used as label values.
+Label cardinality is bounded by the config. `route` is the hostname from the
+YAML, or the fixed sentinel `unknown` for errors raised before a route has
+been resolved (kinds `accept`, `sniff`, and `route`). `cid` is a CID number
+already authorized in config, or the fixed sentinel `unauthorized` for
+peers whose CID is not configured on that port. No user-supplied strings
+are ever used as label values.
 
 ## Operational notes
 
