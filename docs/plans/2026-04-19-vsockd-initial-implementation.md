@@ -96,18 +96,18 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 1: Project skeleton and tooling
 
-- [ ] `go mod init github.com/olomix/vsockd` with Go 1.26 directive
-- [ ] create directories: `cmd/vsockd/`, `internal/config/`,
+- [x] `go mod init github.com/olomix/vsockd` with Go 1.26 directive
+- [x] create directories: `cmd/vsockd/`, `internal/config/`,
       `internal/allowlist/`, `internal/inbound/`, `internal/outbound/`,
       `internal/vsockconn/`, `internal/metrics/`, `examples/`
-- [ ] add `cmd/vsockd/main.go` stub that parses `-config` flag, prints
+- [x] add `cmd/vsockd/main.go` stub that parses `-config` flag, prints
       version, exits 0 — just enough to compile
-- [ ] add `Makefile` with `build`, `test`, `vet`, `lint`, `docker` targets
-- [ ] add `.gitignore` (Go defaults + `/vsockd` binary + `/dist/`)
-- [ ] add `examples/vsockd.yaml` placeholder (filled in Task 2)
-- [ ] write a smoke test in `cmd/vsockd/main_test.go` that runs the binary
+- [x] add `Makefile` with `build`, `test`, `vet`, `lint`, `docker` targets
+- [x] add `.gitignore` (Go defaults + `/vsockd` binary + `/dist/`)
+- [x] add `examples/vsockd.yaml` placeholder (filled in Task 2)
+- [x] write a smoke test in `cmd/vsockd/main_test.go` that runs the binary
       with `-help` and asserts exit code 0
-- [ ] run `go build ./...` and `go test ./...` — both must pass
+- [x] run `go build ./...` and `go test ./...` — both must pass
 
 ### Task 2: Config package
 
