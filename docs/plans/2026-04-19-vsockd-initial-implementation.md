@@ -111,26 +111,26 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 2: Config package
 
-- [ ] define types in `internal/config/config.go`:
+- [x] define types in `internal/config/config.go`:
   - `Config` (top-level)
   - `InboundListener` { Bind, Port, Mode (`http-host`|`tls-sni`), Routes }
   - `Route` { Hostname, CID, VsockPort }
   - `OutboundListener` { Port, CIDs []OutboundCID }
   - `OutboundCID` { CID, AllowedHosts []string }
-- [ ] implement `Load(path string) (*Config, error)` using
+- [x] implement `Load(path string) (*Config, error)` using
       `gopkg.in/yaml.v3` with `KnownFields(true)` (strict)
-- [ ] implement `Validate()`:
+- [x] implement `Validate()`:
   - inbound mode must be one of the two known values
   - every inbound route hostname non-empty, CID ≥ 3, vsock port in range
   - **same CID must not appear under more than one outbound port** (reject)
   - allowlist patterns must be well-formed `host:port` or `*`
   - reject duplicate hostnames within a single inbound listener
-- [ ] write `examples/vsockd.yaml` covering: two inbound listeners (HTTP +
+- [x] write `examples/vsockd.yaml` covering: two inbound listeners (HTTP +
       TLS), multi-CID outbound port, per-CID allowlist, wildcard entry
-- [ ] write tests: table-driven load+validate cases (valid config,
+- [x] write tests: table-driven load+validate cases (valid config,
       duplicate CID across ports, duplicate hostname, unknown mode,
       malformed allowlist, unknown YAML field)
-- [ ] run `go test ./internal/config/...` — must pass before next task
+- [x] run `go test ./internal/config/...` — must pass before next task
 
 ### Task 3: Allowlist matcher
 
