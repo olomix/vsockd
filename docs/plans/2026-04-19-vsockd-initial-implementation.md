@@ -295,15 +295,15 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 12: Dockerfile and example config
 
-- [ ] multi-stage `Dockerfile`:
+- [x] multi-stage `Dockerfile`:
   - builder stage: `golang:1.26-alpine`, `CGO_ENABLED=0`,
     `go build -trimpath -ldflags "-s -w"`
   - runtime stage: `gcr.io/distroless/static-debian12:nonroot`
   - ENTRYPOINT `["/vsockd", "-config", "/etc/vsockd/vsockd.yaml"]`
-- [ ] finalise `examples/vsockd.yaml` with realistic annotated sample
-- [ ] add `docker` target to Makefile that builds the image
-- [ ] (no new tests — build verification only)
-- [ ] run `docker build .` — must succeed before next task
+- [x] finalise `examples/vsockd.yaml` with realistic annotated sample
+- [x] add `docker` target to Makefile that builds the image
+- [x] (no new tests — build verification only)
+- [x] run `docker build .` — must succeed before next task
 
 ### Task 13: README
 
