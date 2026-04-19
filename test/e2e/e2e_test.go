@@ -76,21 +76,6 @@ func fakeEnclave(
 	}()
 }
 
-// httpEnclaveHandler consumes an HTTP request from c and writes a fixed
-// 200 response. Used as the default enclave behaviour for inbound tests.
-func httpEnclaveHandler(body string) func(net.Conn) {
-	return func(c net.Conn) {
-		defer c.Close()
-		br := bufio.NewReader(c)
-		_, _ = http.ReadRequest(br)
-		resp := fmt.Sprintf(
-			"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"+
-				"Connection: close\r\n\r\n%s",
-			len(body), body)
-		_, _ = c.Write([]byte(resp))
-	}
-}
-
 // echoTCPServer spawns a 127.0.0.1 TCP listener that echoes every read back
 // to its peer. It stands in for an external destination that the outbound
 // proxy is authorized to reach. Returns the bound address and a cleanup.

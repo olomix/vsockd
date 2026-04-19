@@ -318,15 +318,17 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 14: Verify acceptance criteria
 
-- [ ] every responsibility from `idea.md` §Responsibilities is implemented
-- [ ] every non-functional requirement from `idea.md` is satisfied
-- [ ] `go vet ./...` clean
-- [ ] `go test ./...` green (race detector: `go test -race ./...`)
-- [ ] coverage ≥ 80% on `config`, `allowlist`, `inbound` parsers
-- [ ] `staticcheck ./...` clean (or the equivalent linter agreed on in
-      Task 1's Makefile)
-- [ ] `idea.md` §"Out of scope for v1" items confirmed absent (no TLS
-      termination code path, no rate limiter, no auth beyond CID)
+- [x] every responsibility from `idea.md` §Responsibilities is implemented
+- [x] every non-functional requirement from `idea.md` is satisfied
+- [x] `go vet ./...` clean
+- [x] `go test ./...` green (race detector: `go test -race ./...`)
+- [x] coverage ≥ 80% on `config` (92.6%), `allowlist` (97.7%), `inbound`
+      parsers (avg 84% across sni.go + httphost.go functions)
+- [x] `staticcheck ./...` clean (removed dead `httpEnclaveHandler` in
+      test/e2e/e2e_test.go that staticcheck flagged as U1000)
+- [x] `idea.md` §"Out of scope for v1" items confirmed absent (no TLS
+      termination code path — only SNI sniffing for passthrough; no rate
+      limiter; no auth beyond CID; no WebSocket-specific handling)
 
 ### Task 15: Documentation polish
 
