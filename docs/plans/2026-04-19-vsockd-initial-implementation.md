@@ -166,19 +166,19 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 5: TLS SNI parser
 
-- [ ] in `internal/inbound/sni.go` implement
+- [x] in `internal/inbound/sni.go` implement
       `SniffSNI(r io.Reader) (host string, buffered []byte, err error)`:
   - read the TLS record header and ClientHello
   - extract `server_name` from the extensions
   - return the full bytes consumed in `buffered` so the caller can replay
     them to the upstream vsock connection (transparent passthrough)
   - bounded read (reject records larger than a sane max, e.g. 16 KiB)
-- [ ] write tests using hand-crafted / recorded ClientHello bytes:
+- [x] write tests using hand-crafted / recorded ClientHello bytes:
   - valid SNI extracted (multiple hostnames)
   - ClientHello with no SNI → error
   - malformed record → error
   - oversized record → error
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 6: HTTP Host header sniffer
 
