@@ -182,15 +182,15 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 6: HTTP Host header sniffer
 
-- [ ] in `internal/inbound/httphost.go` implement
+- [x] in `internal/inbound/httphost.go` implement
       `SniffHost(r io.Reader) (host string, buffered []byte, err error)`:
   - read request line + headers into a buffer (up to max, e.g. 8 KiB)
   - parse `Host:` header; strip port if present
   - return buffered bytes so the caller can replay them
   - return error on malformed request or missing Host
-- [ ] write tests: normal request, header case variations, explicit port in
+- [x] write tests: normal request, header case variations, explicit port in
       Host, oversized headers, missing Host, malformed request line
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 7: vsockconn abstraction
 
