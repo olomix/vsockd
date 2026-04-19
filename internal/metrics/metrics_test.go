@@ -1,0 +1,250 @@
+package metrics
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+)
+
+func TestNewRegistersAllCollectors(t *testing.T) {
+	m := New()
+
+	// Touch each collector once so the metric line appears in the scrape
+	// output regardless of Prometheus' "no samples, no line" behaviour.
+	m.InboundConnections.WithLabelValues("api").Inc()
+	m.InboundBytes.WithLabelValues("api", DirectionIn).Add(10)
+	m.InboundBytes.WithLabelValues("api", DirectionOut).Add(20)
+	m.InboundErrors.WithLabelValues("api", InboundErrorDial).Inc()
+	m.OutboundConnections.WithLabelValues("16", OutboundResultAllowed).Inc()
+	m.OutboundConnections.WithLabelValues("16", OutboundResultDenied).Inc()
+	m.OutboundBytes.WithLabelValues("16", DirectionIn).Add(5)
+	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
+
+	body := scrape(t, m.Handler())
+
+	want := []string{
+		"inbound_connections_total",
+		"inbound_bytes_total",
+		"inbound_errors_total",
+		"outbound_connections_total",
+		"outbound_bytes_total",
+		"config_reloads_total",
+	}
+	for _, name := range want {
+		if !strings.Contains(body, name) {
+			t.Errorf("scrape missing metric %q; got:\n%s", name, body)
+		}
+	}
+}
+
+func TestHandlerUsesIsolatedRegistry(t *testing.T) {
+	a := New()
+	b := New()
+
+	a.InboundConnections.WithLabelValues("api").Add(3)
+	b.InboundConnections.WithLabelValues("api").Add(7)
+
+	if got := counterValue(t, a.InboundConnections, "api"); got != 3 {
+		t.Errorf("registry A leaked: got %v, want 3", got)
+	}
+	if got := counterValue(t, b.InboundConnections, "api"); got != 7 {
+		t.Errorf("registry B leaked: got %v, want 7", got)
+	}
+
+	// The two handlers must expose independent values.
+	aBody := scrape(t, a.Handler())
+	bBody := scrape(t, b.Handler())
+	if !strings.Contains(aBody, "inbound_connections_total{route=\"api\"} 3") {
+		t.Errorf("A scrape missing value 3:\n%s", aBody)
+	}
+	if !strings.Contains(bBody, "inbound_connections_total{route=\"api\"} 7") {
+		t.Errorf("B scrape missing value 7:\n%s", bBody)
+	}
+}
+
+func TestLabelCardinalityBounded(t *testing.T) {
+	m := New()
+
+	// Drive a realistic-ish traffic pattern: two routes, two directions,
+	// two CIDs, three outbound results, two reload results. Assert the
+	// total time series stays at the labels we actually expect, so a
+	// future change that adds a dynamic label (e.g. remote address) will
+	// fail this test loudly.
+	m.InboundConnections.WithLabelValues("api").Inc()
+	m.InboundConnections.WithLabelValues("admin").Inc()
+	m.InboundBytes.WithLabelValues("api", DirectionIn).Inc()
+	m.InboundBytes.WithLabelValues("api", DirectionOut).Inc()
+	m.InboundErrors.WithLabelValues("api", InboundErrorSniff).Inc()
+	m.OutboundConnections.WithLabelValues("16", OutboundResultAllowed).Inc()
+	m.OutboundConnections.WithLabelValues("16", OutboundResultDenied).Inc()
+	m.OutboundConnections.WithLabelValues("20", OutboundResultError).Inc()
+	m.OutboundBytes.WithLabelValues("16", DirectionIn).Inc()
+	m.OutboundBytes.WithLabelValues("16", DirectionOut).Inc()
+	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
+	m.ConfigReloads.WithLabelValues(ReloadResultFailure).Inc()
+
+	cases := []struct {
+		name string
+		vec  *prometheus.CounterVec
+		want int
+	}{
+		{"inbound_connections_total", m.InboundConnections, 2},
+		{"inbound_bytes_total", m.InboundBytes, 2},
+		{"inbound_errors_total", m.InboundErrors, 1},
+		{"outbound_connections_total", m.OutboundConnections, 3},
+		{"outbound_bytes_total", m.OutboundBytes, 2},
+		{"config_reloads_total", m.ConfigReloads, 2},
+	}
+	for _, tc := range cases {
+		if got := collectorSeriesCount(t, tc.vec); got != tc.want {
+			t.Errorf("%s: series count = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestFormatCID(t *testing.T) {
+	cases := []struct {
+		in   uint32
+		want string
+	}{
+		{0, "0"},
+		{3, "3"},
+		{16, "16"},
+		{4294967295, "4294967295"},
+	}
+	for _, tc := range cases {
+		if got := FormatCID(tc.in); got != tc.want {
+			t.Errorf("FormatCID(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestServeMetricsServesAndStopsOnContextCancel(t *testing.T) {
+	m := New()
+	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
+
+	// Pick an ephemeral port rather than hardcoding.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("probe close: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- m.ServeMetrics(ctx, addr) }()
+
+	// Wait briefly for the server to accept connections.
+	url := "http://" + addr + "/metrics"
+	body, err := getWithRetry(url, 2*time.Second)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	if !strings.Contains(body, "config_reloads_total") {
+		t.Errorf("scrape missing config_reloads_total:\n%s", body)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("ServeMetrics returned error after cancel: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServeMetrics did not return after context cancel")
+	}
+}
+
+func TestServeMetricsReturnsListenError(t *testing.T) {
+	m := New()
+
+	// Bind ephemeral port then hold it, then ask ServeMetrics to bind the
+	// same address — expected to fail immediately with EADDRINUSE.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = m.ServeMetrics(ctx, ln.Addr().String())
+	if err == nil {
+		t.Fatal("expected error from duplicate bind, got nil")
+	}
+}
+
+func scrape(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scrape status = %d, want 200", rec.Code)
+	}
+	return rec.Body.String()
+}
+
+func counterValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	c, err := vec.GetMetricWithLabelValues(labels...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if m.Counter == nil {
+		t.Fatalf("metric has no counter payload")
+	}
+	return m.Counter.GetValue()
+}
+
+func collectorSeriesCount(t *testing.T, c prometheus.Collector) int {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 64)
+	go func() {
+		c.Collect(ch)
+		close(ch)
+	}()
+	n := 0
+	for range ch {
+		n++
+	}
+	return n
+}
+
+func getWithRetry(url string, within time.Duration) (string, error) {
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
+	return "", lastErr
+}

@@ -147,7 +147,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 4: Metrics package
 
-- [ ] in `internal/metrics/metrics.go` define a struct holding the
+- [x] in `internal/metrics/metrics.go` define a struct holding the
       Prometheus collectors:
   - `inbound_connections_total{route}` counter
   - `inbound_bytes_total{route,direction}` counter
@@ -156,13 +156,13 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
     denied, error)
   - `outbound_bytes_total{cid,direction}` counter
   - `config_reloads_total{result}` counter
-- [ ] provide `New() *Metrics` and an `http.Handler` (`promhttp.HandlerFor`
+- [x] provide `New() *Metrics` and an `http.Handler` (`promhttp.HandlerFor`
       against an isolated registry — no global state)
-- [ ] expose a `ServeMetrics(addr string)` helper that wires the handler
+- [x] expose a `ServeMetrics(addr string)` helper that wires the handler
       onto `/metrics`
-- [ ] write tests: registering and scraping the handler returns expected
+- [x] write tests: registering and scraping the handler returns expected
       metric names; label cardinality stays bounded
-- [ ] run `go test ./internal/metrics/...` — must pass before next task
+- [x] run `go test ./internal/metrics/...` — must pass before next task
 
 ### Task 5: TLS SNI parser
 
