@@ -212,7 +212,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 8: Inbound listener
 
-- [ ] in `internal/inbound/server.go` implement `Server` with
+- [x] in `internal/inbound/server.go` implement `Server` with
       `Start(ctx)` / `Shutdown(ctx)`:
   - listens on configured `bind:port` per inbound listener
   - for each accepted conn: sniff host (HTTP or TLS per mode), look up
@@ -222,13 +222,13 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
   - record metrics (connections, bytes, errors, denied-route)
   - graceful shutdown: stop accepting, wait for active copies up to a
     configurable grace period
-- [ ] write integration tests using the loopback vsock backend:
+- [x] write integration tests using the loopback vsock backend:
   - plain HTTP: request with matching Host routes to the right fake
     enclave; non-matching Host is closed with a log/metric
   - TLS: record a tiny fake ClientHello; matching SNI routed, non-matching
     closed
   - upstream failure propagates to client
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 9: Outbound listener
 
