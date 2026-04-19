@@ -347,6 +347,68 @@ func TestProxy_AbsoluteURIGet(t *testing.T) {
 		metrics.FormatCID(enclaveCID), metrics.DirectionIn)
 }
 
+// TestProxy_HostHeaderRewritten verifies RFC 7230 §5.4: when the enclave
+// sends an absolute-URI request whose Host header disagrees with the
+// request-target, the proxy must ignore the received Host header and
+// forward the request-target's host. This also defends against using a
+// mismatched Host header to reach a different vhost on an allowlisted IP.
+func TestProxy_HostHeaderRewritten(t *testing.T) {
+	var sawHost string
+	upstream := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sawHost = r.Host
+			fmt.Fprintln(w, "ok")
+		}))
+	t.Cleanup(upstream.Close)
+
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+
+	reg := vsockconn.NewRegistry()
+	const enclaveCID uint32 = 16
+	const vsockPort uint32 = 8080
+
+	m := metrics.New()
+	cfgs := []config.OutboundListener{{
+		Port: vsockPort,
+		CIDs: []config.OutboundCID{{
+			CID:          enclaveCID,
+			AllowedHosts: []string{u.Host},
+		}},
+	}}
+	startServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m)
+
+	d := vsockconn.NewLoopbackDialer(reg, enclaveCID)
+	c, err := d.Dial(hostCID, vsockPort)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	reqLine := fmt.Sprintf(
+		"GET %s/ HTTP/1.1\r\nHost: attacker.example.com\r\n\r\n",
+		upstream.URL)
+	if _, err := c.Write([]byte(reqLine)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if sawHost != u.Host {
+		t.Errorf("upstream Host = %q, want %q (received Host header "+
+			"must be replaced with request-target host)", sawHost, u.Host)
+	}
+}
+
 // TestProxy_DeniedByAllowlist verifies absolute-URI GET to a disallowed
 // destination gets 403.
 func TestProxy_DeniedByAllowlist(t *testing.T) {

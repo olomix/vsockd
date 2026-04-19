@@ -614,11 +614,13 @@ func (l *listener) handleProxy(
 	defer l.server.untrackConn(upstream)
 
 	// Rewrite to origin form: strip Scheme/Host from URL so req.Write
-	// emits a relative request-URI. Preserve req.Host so the upstream's
-	// Host header remains correct for virtual-hosted services.
-	if req.Host == "" {
-		req.Host = req.URL.Host
-	}
+	// emits a relative request-URI. Replace req.Host with req.URL.Host
+	// unconditionally: RFC 7230 §5.4 requires a proxy handling an
+	// absolute-form request-target to ignore any received Host header and
+	// substitute the host from the request-target. This also keeps the
+	// upstream Host header aligned with the allowlisted hostname instead
+	// of letting the enclave target a different vhost on the same IP.
+	req.Host = req.URL.Host
 	req.URL = &url.URL{
 		Path:     req.URL.Path,
 		RawPath:  req.URL.RawPath,
