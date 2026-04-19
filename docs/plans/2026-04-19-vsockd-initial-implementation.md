@@ -307,7 +307,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 13: README
 
-- [ ] `README.md` with:
+- [x] `README.md` with:
   - what it is / why / architecture diagram (ASCII ok)
   - build + install on host (systemd unit snippet)
   - config reference (link to example)
