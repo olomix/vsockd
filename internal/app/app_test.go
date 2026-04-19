@@ -258,6 +258,69 @@ shutdown_grace: 2s
 	}
 }
 
+// TestStartReturnsMetricsBindError holds the metrics port, then starts the
+// app configured to bind the same address. Start must surface the bind
+// error; previously net.Listen lived inside the serve goroutine, so bind
+// failures were only logged and the daemon stayed up without /metrics.
+func TestStartReturnsMetricsBindError(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold port: %v", err)
+	}
+	defer held.Close()
+	metricsAddr := held.Addr().String()
+
+	inPort := allocPort(t)
+	body := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, body)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	_, dialer, listenFn := loopbackBackend(2)
+	a, err := app.New(app.Options{
+		ConfigPath:    cfgPath,
+		Config:        cfg,
+		Logger:        discardLogger(),
+		MetricsAddr:   metricsAddr,
+		VsockDialer:   dialer,
+		VsockListenFn: listenFn,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := a.Start(ctx); err == nil {
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 2*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+		t.Fatal("Start succeeded despite held metrics port")
+	}
+
+	// After a failed Start the inbound listener on inPort must also be
+	// released so the next Start (or another process) can bind it.
+	if c, err := net.DialTimeout(
+		"tcp", fmt.Sprintf("127.0.0.1:%d", inPort),
+		200*time.Millisecond,
+	); err == nil {
+		_ = c.Close()
+		t.Fatalf("inbound listener still accepting after Start failure")
+	}
+}
+
 // TestReloadAddAndRemoveListener drives a SIGHUP-equivalent Reload: the
 // new config adds an inbound listener and removes the original one. We
 // verify the diff landed by inspecting ListenerKeys and by opening a TCP

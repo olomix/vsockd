@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -64,6 +65,7 @@ type App struct {
 	metricsDone chan struct{}
 	metricsCtx  context.Context
 	metricsStop context.CancelFunc
+	metricsLn   net.Listener
 
 	// currentCfg is the most recently loaded+applied config. Reload
 	// replaces it atomically while holding reloadMu.
@@ -134,14 +136,27 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	if a.opts.MetricsAddr != "" {
+		// Bind synchronously so EADDRINUSE / permission errors abort Start
+		// instead of vanishing into an async log line that leaves the daemon
+		// running without a /metrics endpoint.
+		ln, err := metrics.ListenMetrics(a.opts.MetricsAddr)
+		if err != nil {
+			_ = a.inbound.Shutdown(context.Background())
+			_ = a.out.Shutdown(context.Background())
+			return fmt.Errorf(
+				"metrics listen %s: %w", a.opts.MetricsAddr, err)
+		}
+		a.metricsLn = ln
 		a.metricsCtx, a.metricsStop = context.WithCancel(context.Background())
 		a.metricsDone = make(chan struct{})
-		addr := a.opts.MetricsAddr
+		grace := a.grace()
 		go func() {
 			defer close(a.metricsDone)
-			if err := a.metric.ServeMetrics(a.metricsCtx, addr); err != nil {
+			if err := a.metric.ServeMetrics(
+				a.metricsCtx, ln, grace,
+			); err != nil {
 				a.opts.Logger.Error("metrics server exited",
-					"addr", addr, "err", err)
+					"addr", a.opts.MetricsAddr, "err", err)
 			}
 		}()
 	}
@@ -213,7 +228,16 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	if a.metricsStop != nil {
 		a.metricsStop()
-		<-a.metricsDone
+		// If shutdownCtx expires while metrics is still draining in-flight
+		// scrapes, force the listener closed so srv.Serve returns and the
+		// goroutine exits instead of blocking the process past the grace
+		// window (e.g. systemd's TimeoutStopSec).
+		select {
+		case <-a.metricsDone:
+		case <-shutdownCtx.Done():
+			_ = a.metricsLn.Close()
+			<-a.metricsDone
+		}
 	}
 	return firstErr
 }

@@ -137,22 +137,27 @@ func FormatCID(cid uint32) string {
 	return strconv.FormatUint(uint64(cid), 10)
 }
 
-// ServeMetrics starts an HTTP server exposing /metrics on addr and blocks
-// until ctx is cancelled or the listener fails. The listener is closed on
-// ctx.Done(). http.ErrServerClosed is treated as a clean shutdown.
-func (m *Metrics) ServeMetrics(ctx context.Context, addr string) error {
+// ListenMetrics binds a TCP listener for the /metrics HTTP endpoint. Split
+// from ServeMetrics so callers can surface bind errors (EADDRINUSE, permission
+// denied) synchronously from their Start paths rather than having them vanish
+// into an async log line.
+func ListenMetrics(addr string) (net.Listener, error) {
+	return net.Listen("tcp", addr)
+}
+
+// ServeMetrics runs the /metrics HTTP server on ln and blocks until ctx is
+// cancelled or the server fails. On cancellation, srv.Shutdown is given up
+// to shutdownGrace to drain in-flight scrapes so the caller's overall grace
+// window is honoured; http.ErrServerClosed is treated as a clean shutdown.
+func (m *Metrics) ServeMetrics(
+	ctx context.Context, ln net.Listener, shutdownGrace time.Duration,
+) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())
 
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
 	}
 
 	errCh := make(chan error, 1)
@@ -163,7 +168,7 @@ func (m *Metrics) ServeMetrics(ctx context.Context, addr string) error {
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(
-			context.Background(), 5*time.Second)
+			context.Background(), shutdownGrace)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		<-errCh

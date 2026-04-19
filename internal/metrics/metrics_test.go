@@ -131,21 +131,17 @@ func TestServeMetricsServesAndStopsOnContextCancel(t *testing.T) {
 	m := New()
 	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
 
-	// Pick an ephemeral port rather than hardcoding.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ListenMetrics("127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("probe listen: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("probe close: %v", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- m.ServeMetrics(ctx, addr) }()
+	go func() { done <- m.ServeMetrics(ctx, ln, 2*time.Second) }()
 
 	// Wait briefly for the server to accept connections.
 	url := "http://" + addr + "/metrics"
@@ -168,22 +164,19 @@ func TestServeMetricsServesAndStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestServeMetricsReturnsListenError(t *testing.T) {
-	m := New()
-
-	// Bind ephemeral port then hold it, then ask ServeMetrics to bind the
-	// same address — expected to fail immediately with EADDRINUSE.
+func TestListenMetricsReturnsBindError(t *testing.T) {
+	// Hold an ephemeral port, then ask ListenMetrics to bind the same
+	// address — expected to fail immediately with EADDRINUSE so the caller
+	// can surface the error synchronously from its Start path.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err = m.ServeMetrics(ctx, ln.Addr().String())
+	dup, err := ListenMetrics(ln.Addr().String())
 	if err == nil {
+		dup.Close()
 		t.Fatal("expected error from duplicate bind, got nil")
 	}
 }
