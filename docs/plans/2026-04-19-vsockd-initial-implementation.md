@@ -134,16 +134,16 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 3: Allowlist matcher
 
-- [ ] in `internal/allowlist/allowlist.go` define `Matcher` built from
+- [x] in `internal/allowlist/allowlist.go` define `Matcher` built from
       a list of patterns; supports exact `host:port`, suffix wildcard
       `*.example.com:443`, and universal `*`
-- [ ] implement `New(patterns []string) (*Matcher, error)` — parse once,
+- [x] implement `New(patterns []string) (*Matcher, error)` — parse once,
       validate patterns
-- [ ] implement `Allow(host string, port int) bool`
-- [ ] write tests: exact match, suffix match (including nested subdomains),
+- [x] implement `Allow(host string, port int) bool`
+- [x] write tests: exact match, suffix match (including nested subdomains),
       port mismatch, host casing normalisation, `*` wildcard, rejection
       path, malformed pattern
-- [ ] run `go test ./internal/allowlist/...` — must pass before next task
+- [x] run `go test ./internal/allowlist/...` — must pass before next task
 
 ### Task 4: Metrics package
 
