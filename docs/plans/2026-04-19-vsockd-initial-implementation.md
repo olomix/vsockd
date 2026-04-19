@@ -232,7 +232,7 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 9: Outbound listener
 
-- [ ] in `internal/outbound/server.go` implement `Server` with
+- [x] in `internal/outbound/server.go` implement `Server` with
       `Start(ctx)` / `Shutdown(ctx)`:
   - opens one vsock listener per configured outbound port
   - on Accept, take peer CID; if not listed for this port → log, increment
@@ -246,13 +246,13 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
       response back; deny → 403
   - sensible timeouts on header read, upstream dial
   - metrics on every decision and byte counts
-- [ ] write integration tests using loopback vsock:
+- [x] write integration tests using loopback vsock:
   - allowed CONNECT to a local echo TCP server passes bytes both ways
   - denied CONNECT (allowlist miss) → 403, no upstream dial
   - allowed absolute-URI GET → response flows back
   - wrong peer CID for the port → connection closed
   - malformed request line → 400 then close
-- [ ] run `go test ./internal/outbound/...` — must pass before next task
+- [x] run `go test ./internal/outbound/...` — must pass before next task
 
 ### Task 10: Main wiring, signals, reload, graceful shutdown
 
