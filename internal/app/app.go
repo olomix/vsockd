@@ -90,12 +90,14 @@ func New(opts Options) (*App, error) {
 	m := metrics.New()
 
 	in, err := inbound.NewServer(
-		opts.Config.Inbound, opts.VsockDialer, m, opts.Logger)
+		opts.Config.Inbound, opts.Config.TCPToVsock,
+		opts.VsockDialer, m, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("inbound: %w", err)
 	}
 	out, err := outbound.NewServer(
-		opts.Config.Outbound, opts.VsockListenFn, m, opts.Logger)
+		opts.Config.Outbound, opts.Config.VsockToTCP,
+		opts.VsockListenFn, m, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("outbound: %w", err)
 	}
@@ -191,14 +193,14 @@ func (a *App) Reload() error {
 			"path", a.opts.ConfigPath, "err", err)
 		return err
 	}
-	inPlan, err := a.inbound.PrepareApply(cfg.Inbound)
+	inPlan, err := a.inbound.PrepareApply(cfg.Inbound, cfg.TCPToVsock)
 	if err != nil {
 		a.metric.ConfigReloads.
 			WithLabelValues(metrics.ReloadResultFailure).Inc()
 		a.opts.Logger.Error("inbound reload failed", "err", err)
 		return err
 	}
-	outPlan, err := a.out.PrepareApply(cfg.Outbound)
+	outPlan, err := a.out.PrepareApply(cfg.Outbound, cfg.VsockToTCP)
 	if err != nil {
 		inPlan.AbortApply()
 		a.metric.ConfigReloads.

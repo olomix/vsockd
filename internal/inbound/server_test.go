@@ -38,7 +38,7 @@ func startServer(
 	m *metrics.Metrics,
 ) *Server {
 	t.Helper()
-	s, err := NewServer(listeners, dialer, m, discardLogger())
+	s, err := NewServer(listeners, nil, dialer, m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestServerShutdownGraceful(t *testing.T) {
 			{Hostname: "api.example.com", CID: 16, VsockPort: 8080},
 		},
 	}}
-	s, err := NewServer(cfg, vsockconn.NewLoopbackDialer(reg, 2),
+	s, err := NewServer(cfg, nil, vsockconn.NewLoopbackDialer(reg, 2),
 		m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -460,7 +460,7 @@ func TestServerShutdownForceClosesStuckConn(t *testing.T) {
 			{Hostname: "api.example.com", CID: 16, VsockPort: 8080},
 		},
 	}}
-	s, err := NewServer(cfg, vsockconn.NewLoopbackDialer(reg, 2),
+	s, err := NewServer(cfg, nil, vsockconn.NewLoopbackDialer(reg, 2),
 		m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -583,7 +583,7 @@ func TestServerMultipleListeners(t *testing.T) {
 // Start is a no-op, Shutdown does nothing.
 func TestServerNoListenersConfigured(t *testing.T) {
 	m := metrics.New()
-	s, err := NewServer(nil, vsockconn.NewLoopbackDialer(
+	s, err := NewServer(nil, nil, vsockconn.NewLoopbackDialer(
 		vsockconn.NewRegistry(), 2), m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -614,6 +614,7 @@ func TestNewServerRejectsUnknownMode(t *testing.T) {
 				{Hostname: "x", CID: 16, VsockPort: 1},
 			},
 		}},
+		nil,
 		vsockconn.NewLoopbackDialer(vsockconn.NewRegistry(), 2),
 		m, discardLogger(),
 	)
@@ -628,10 +629,11 @@ func TestNewServerRejectsUnknownMode(t *testing.T) {
 // TestNewServerRejectsNilDependencies locks down the required arguments.
 func TestNewServerRejectsNilDependencies(t *testing.T) {
 	reg := vsockconn.NewRegistry()
-	if _, err := NewServer(nil, nil, metrics.New(), discardLogger()); err == nil {
+	if _, err := NewServer(nil, nil, nil,
+		metrics.New(), discardLogger()); err == nil {
 		t.Error("expected error on nil dialer")
 	}
-	if _, err := NewServer(nil,
+	if _, err := NewServer(nil, nil,
 		vsockconn.NewLoopbackDialer(reg, 2), nil, discardLogger()); err == nil {
 		t.Error("expected error on nil metrics")
 	}
@@ -657,6 +659,7 @@ func TestServerBindConflict(t *testing.T) {
 				{Hostname: "x", CID: 16, VsockPort: 1},
 			},
 		}},
+		nil,
 		vsockconn.NewLoopbackDialer(vsockconn.NewRegistry(), 2),
 		m, discardLogger(),
 	)
@@ -702,7 +705,7 @@ func TestApplyModeChangeSameAddrReturnsClearError(t *testing.T) {
 			{Hostname: "x", CID: 16, VsockPort: 1},
 		},
 	}}
-	err := s.Apply(updated)
+	err := s.Apply(updated, nil)
 	if err == nil {
 		t.Fatal("Apply with changed mode returned nil, want error")
 	}
@@ -716,9 +719,9 @@ func TestApplyModeChangeSameAddrReturnsClearError(t *testing.T) {
 	if len(s.listeners) != 1 {
 		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
 	}
-	if s.listeners[0].cfg.Mode != config.ModeHTTPHost {
+	if s.listeners[0].mode != config.ModeHTTPHost {
 		t.Fatalf("listener mode = %q; want original %q preserved",
-			s.listeners[0].cfg.Mode, config.ModeHTTPHost)
+			s.listeners[0].mode, config.ModeHTTPHost)
 	}
 }
 
@@ -771,6 +774,7 @@ func TestShutdownCancelsPendingUpstreamDial(t *testing.T) {
 				{Hostname: "x", CID: 16, VsockPort: 1},
 			},
 		}},
+		nil,
 		dialer, m, discardLogger(),
 	)
 	if err != nil {

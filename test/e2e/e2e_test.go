@@ -642,15 +642,13 @@ func TestEndToEnd_TCPPassthrough(t *testing.T) {
 	cfgPath := filepath.Join(dir, "vsockd.yaml")
 	initial := fmt.Sprintf(`
 log_level: debug
-inbound:
+tcp_to_vsock:
   - bind: 127.0.0.1
     port: %d
-    mode: tcp
-    target_cid: %d
-    target_port: %d
-outbound:
+    vsock_cid: %d
+    vsock_port: %d
+vsock_to_tcp:
   - port: %d
-    mode: tcp
     upstream: "%s"
 shutdown_grace: 2s
 `, inTCPPort, enclaveCID, inVsockPort, outVsockPort, echoA)
@@ -754,15 +752,13 @@ shutdown_grace: 2s
 		echoB := startPrefixEcho(t, "B")
 		updated := fmt.Sprintf(`
 log_level: debug
-inbound:
+tcp_to_vsock:
   - bind: 127.0.0.1
     port: %d
-    mode: tcp
-    target_cid: %d
-    target_port: %d
-outbound:
+    vsock_cid: %d
+    vsock_port: %d
+vsock_to_tcp:
   - port: %d
-    mode: tcp
     upstream: "%s"
 shutdown_grace: 2s
 `, inTCPPort, enclaveCID, inVsockPort, outVsockPort, echoB)

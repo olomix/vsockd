@@ -45,7 +45,7 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 
 	peerCID := c.PeerCID()
 	peerPort := c.PeerPort()
-	listenPort := l.cfg.Port
+	listenPort := l.port
 
 	l.server.metric.TCPOutboundConnections.Inc()
 	l.server.logger.Debug("inbound vsock connection",

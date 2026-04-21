@@ -19,11 +19,9 @@ import (
 )
 
 // Inbound mode values; the YAML mode field must be one of these.
-// ModeTCP is also valid for outbound listeners.
 const (
 	ModeHTTPHost = "http-host"
 	ModeTLSSNI   = "tls-sni"
-	ModeTCP      = "tcp"
 )
 
 // Log format values; empty means the caller picks a default.
@@ -48,26 +46,24 @@ const vsockPortAny uint32 = 0xFFFFFFFF
 
 // Config is the top-level vsockd configuration.
 type Config struct {
-	Inbound       []InboundListener  `yaml:"inbound"`
-	Outbound      []OutboundListener `yaml:"outbound"`
-	Metrics       MetricsConfig      `yaml:"metrics"`
-	ShutdownGrace Duration           `yaml:"shutdown_grace"`
-	LogFormat     string             `yaml:"log_format"`
-	LogLevel      string             `yaml:"log_level"`
+	Inbound       []InboundListener    `yaml:"inbound"`
+	Outbound      []OutboundListener   `yaml:"outbound"`
+	TCPToVsock    []TCPToVsockListener `yaml:"tcp_to_vsock"`
+	VsockToTCP    []VsockToTCPListener `yaml:"vsock_to_tcp"`
+	Metrics       MetricsConfig        `yaml:"metrics"`
+	ShutdownGrace Duration             `yaml:"shutdown_grace"`
+	LogFormat     string               `yaml:"log_format"`
+	LogLevel      string               `yaml:"log_level"`
 }
 
-// InboundListener terminates TCP on the host and routes to enclave vsocks.
-//
-// For mode=tcp: TargetCID/TargetPort point at a fixed enclave vsock endpoint
-// and Routes must be empty. For mode=http-host / tls-sni: Routes carry the
-// per-hostname vsock mappings and TargetCID/TargetPort must be zero.
+// InboundListener terminates TCP on the host and routes to enclave vsocks
+// using either the HTTP Host header (mode: http-host) or TLS SNI
+// (mode: tls-sni). Raw-TCP passthrough moved to TCPToVsockListener.
 type InboundListener struct {
-	Bind       string  `yaml:"bind"`
-	Port       int     `yaml:"port"`
-	Mode       string  `yaml:"mode"`
-	Routes     []Route `yaml:"routes"`
-	TargetCID  uint32  `yaml:"target_cid"`
-	TargetPort uint32  `yaml:"target_port"`
+	Bind   string  `yaml:"bind"`
+	Port   int     `yaml:"port"`
+	Mode   string  `yaml:"mode"`
+	Routes []Route `yaml:"routes"`
 }
 
 // Route binds a hostname (HTTP Host header or TLS SNI) to an enclave endpoint.
@@ -77,24 +73,36 @@ type Route struct {
 	VsockPort uint32 `yaml:"vsock_port"`
 }
 
-// OutboundListener accepts vsock connections on a single port.
-//
-// Legacy (Mode == ""): each allowed peer CID carries its own egress allowlist
-// in CIDs for the HTTP forward-proxy handler. Upstream must be empty.
-//
-// Mode == "tcp": the listener is a raw passthrough dialing a fixed
-// Upstream host:port; CIDs must be empty.
+// OutboundListener accepts vsock connections on a single port and runs the
+// HTTP forward-proxy handler: every connection is authorized by peer CID,
+// then exactly one HTTP request (CONNECT or absolute-URI GET/POST) is
+// matched against that CID's egress allowlist. Raw vsock→TCP passthrough
+// moved to VsockToTCPListener.
 type OutboundListener struct {
-	Port     uint32        `yaml:"port"`
-	Mode     string        `yaml:"mode"`
-	Upstream string        `yaml:"upstream"`
-	CIDs     []OutboundCID `yaml:"cids"`
+	Port uint32        `yaml:"port"`
+	CIDs []OutboundCID `yaml:"cids"`
 }
 
 // OutboundCID is the per-CID egress policy scoped to one outbound listener.
 type OutboundCID struct {
 	CID          uint32   `yaml:"cid"`
 	AllowedHosts []string `yaml:"allowed_hosts"`
+}
+
+// TCPToVsockListener terminates TCP on a host or enclave port and forwards
+// the raw byte stream to a fixed vsock endpoint.
+type TCPToVsockListener struct {
+	Bind      string `yaml:"bind"`
+	Port      int    `yaml:"port"`
+	VsockCID  uint32 `yaml:"vsock_cid"`
+	VsockPort uint32 `yaml:"vsock_port"`
+}
+
+// VsockToTCPListener accepts vsock connections on the given vsock port and
+// forwards the raw byte stream to a fixed TCP upstream.
+type VsockToTCPListener struct {
+	Port     uint32 `yaml:"port"`
+	Upstream string `yaml:"upstream"`
 }
 
 // MetricsConfig controls the Prometheus HTTP endpoint.
@@ -146,15 +154,17 @@ func Load(path string) (*Config, error) {
 
 // Validate enforces the semantic constraints from the implementation plan.
 func (c *Config) Validate() error {
-	if len(c.Inbound) == 0 && len(c.Outbound) == 0 {
-		return errors.New("config has no inbound or outbound listeners")
+	if len(c.Inbound) == 0 && len(c.Outbound) == 0 &&
+		len(c.TCPToVsock) == 0 && len(c.VsockToTCP) == 0 {
+		return errors.New("config has no listeners configured")
 	}
 
-	// Two listeners sharing the same (bind, port) would collide at bind time
-	// on first Start, and silently collapse during SIGHUP reloads where the
-	// Apply keyed-existing-listener fast path treats duplicate keys as the
-	// same listener.
-	seenBind := make(map[string]int)
+	// Two TCP listeners sharing the same (bind, port) would collide at bind
+	// time on first Start, and silently collapse during SIGHUP reloads where
+	// the Apply keyed-existing-listener fast path treats duplicate keys as
+	// the same listener. The map is shared across inbound and tcp_to_vsock
+	// so a port declared in one section cannot also appear in the other.
+	seenBind := make(map[string]string)
 	for i := range c.Inbound {
 		if err := c.Inbound[i].validate(); err != nil {
 			return fmt.Errorf("inbound[%d]: %w", i, err)
@@ -162,78 +172,84 @@ func (c *Config) Validate() error {
 		key := fmt.Sprintf("%s|%d", c.Inbound[i].Bind, c.Inbound[i].Port)
 		if prev, ok := seenBind[key]; ok {
 			return fmt.Errorf(
-				"inbound[%d]: duplicate bind %s:%d already declared in inbound[%d]",
+				"inbound[%d]: duplicate bind %s:%d already declared in %s",
 				i, c.Inbound[i].Bind, c.Inbound[i].Port, prev)
 		}
-		seenBind[key] = i
+		seenBind[key] = fmt.Sprintf("inbound[%d]", i)
+	}
+	for i := range c.TCPToVsock {
+		if err := c.TCPToVsock[i].validate(); err != nil {
+			return fmt.Errorf("tcp_to_vsock[%d]: %w", i, err)
+		}
+		key := fmt.Sprintf("%s|%d", c.TCPToVsock[i].Bind, c.TCPToVsock[i].Port)
+		if prev, ok := seenBind[key]; ok {
+			return fmt.Errorf(
+				"tcp_to_vsock[%d]: duplicate bind %s:%d already declared in %s",
+				i, c.TCPToVsock[i].Bind, c.TCPToVsock[i].Port, prev)
+		}
+		seenBind[key] = fmt.Sprintf("tcp_to_vsock[%d]", i)
 	}
 
-	// Cross-port uniqueness: a CID may appear under at most one outbound port.
-	// Remember the owning port so the error message points to the conflict.
+	// Cross-port uniqueness: a CID may appear under at most one outbound
+	// port. Remember the owning port so the error message points to the
+	// conflict. Vsock ports are unique across outbound and vsock_to_tcp.
 	cidOwner := make(map[uint32]uint32)
-	seenPort := make(map[uint32]bool)
+	seenPort := make(map[uint32]string)
 
 	for i := range c.Outbound {
 		ob := &c.Outbound[i]
 		if ob.Port == 0 || ob.Port >= vsockPortAny {
 			return fmt.Errorf("outbound[%d]: port %d out of range", i, ob.Port)
 		}
-		if seenPort[ob.Port] {
-			return fmt.Errorf("outbound[%d]: duplicate port %d", i, ob.Port)
+		if prev, ok := seenPort[ob.Port]; ok {
+			return fmt.Errorf(
+				"outbound[%d]: duplicate port %d already declared in %s",
+				i, ob.Port, prev)
 		}
-		seenPort[ob.Port] = true
+		seenPort[ob.Port] = fmt.Sprintf("outbound[%d]", i)
 
-		switch ob.Mode {
-		case "":
-			if ob.Upstream != "" {
-				return fmt.Errorf(
-					"outbound[%d]: upstream only valid with mode: tcp", i)
-			}
-			if len(ob.CIDs) == 0 {
-				return fmt.Errorf("outbound[%d]: at least one cid required", i)
-			}
-			for j := range ob.CIDs {
-				oc := &ob.CIDs[j]
-				if oc.CID < minCID {
-					return fmt.Errorf(
-						"outbound[%d].cids[%d]: cid %d must be >= %d",
-						i, j, oc.CID, minCID)
-				}
-				if prev, ok := cidOwner[oc.CID]; ok {
-					return fmt.Errorf(
-						"outbound[%d].cids[%d]: cid %d already listed under outbound port %d",
-						i, j, oc.CID, prev)
-				}
-				cidOwner[oc.CID] = ob.Port
-				if len(oc.AllowedHosts) == 0 {
-					return fmt.Errorf(
-						"outbound[%d].cids[%d]: allowed_hosts must not be empty",
-						i, j)
-				}
-				for k, pat := range oc.AllowedHosts {
-					if err := validatePattern(pat); err != nil {
-						return fmt.Errorf(
-							"outbound[%d].cids[%d].allowed_hosts[%d]: %w",
-							i, j, k, err)
-					}
-				}
-			}
-		case ModeTCP:
-			if len(ob.CIDs) > 0 {
-				return fmt.Errorf(
-					"outbound[%d]: cids not allowed with mode: tcp", i)
-			}
-			if ob.Upstream == "" {
-				return fmt.Errorf(
-					"outbound[%d]: upstream required for mode: tcp", i)
-			}
-			if err := validateHostPort(ob.Upstream); err != nil {
-				return fmt.Errorf("outbound[%d]: upstream %w", i, err)
-			}
-		default:
-			return fmt.Errorf("outbound[%d]: mode %q must be %q or empty",
-				i, ob.Mode, ModeTCP)
+		if len(ob.CIDs) == 0 {
+			return fmt.Errorf("outbound[%d]: at least one cid required", i)
 		}
+		for j := range ob.CIDs {
+			oc := &ob.CIDs[j]
+			if oc.CID < minCID {
+				return fmt.Errorf(
+					"outbound[%d].cids[%d]: cid %d must be >= %d",
+					i, j, oc.CID, minCID)
+			}
+			if prev, ok := cidOwner[oc.CID]; ok {
+				return fmt.Errorf(
+					"outbound[%d].cids[%d]: cid %d already listed under outbound port %d",
+					i, j, oc.CID, prev)
+			}
+			cidOwner[oc.CID] = ob.Port
+			if len(oc.AllowedHosts) == 0 {
+				return fmt.Errorf(
+					"outbound[%d].cids[%d]: allowed_hosts must not be empty",
+					i, j)
+			}
+			for k, pat := range oc.AllowedHosts {
+				if err := validatePattern(pat); err != nil {
+					return fmt.Errorf(
+						"outbound[%d].cids[%d].allowed_hosts[%d]: %w",
+						i, j, k, err)
+				}
+			}
+		}
+	}
+
+	for i := range c.VsockToTCP {
+		if err := c.VsockToTCP[i].validate(); err != nil {
+			return fmt.Errorf("vsock_to_tcp[%d]: %w", i, err)
+		}
+		p := c.VsockToTCP[i].Port
+		if prev, ok := seenPort[p]; ok {
+			return fmt.Errorf(
+				"vsock_to_tcp[%d]: duplicate port %d already declared in %s",
+				i, p, prev)
+		}
+		seenPort[p] = fmt.Sprintf("vsock_to_tcp[%d]", i)
 	}
 
 	switch c.LogFormat {
@@ -273,48 +289,62 @@ func (il *InboundListener) validate() error {
 	}
 	switch il.Mode {
 	case ModeHTTPHost, ModeTLSSNI:
-		if il.TargetCID != 0 || il.TargetPort != 0 {
-			return fmt.Errorf(
-				"target_cid/target_port only valid with mode: tcp")
-		}
-		if len(il.Routes) == 0 {
-			return errors.New("at least one route required")
-		}
-		seenHost := make(map[string]bool)
-		for i := range il.Routes {
-			r := &il.Routes[i]
-			if r.Hostname == "" {
-				return fmt.Errorf("routes[%d]: hostname must not be empty", i)
-			}
-			h := strings.ToLower(r.Hostname)
-			if seenHost[h] {
-				return fmt.Errorf(
-					"routes[%d]: duplicate hostname %q", i, r.Hostname)
-			}
-			seenHost[h] = true
-			if r.CID < minCID {
-				return fmt.Errorf("routes[%d]: cid %d must be >= %d",
-					i, r.CID, minCID)
-			}
-			if r.VsockPort == 0 || r.VsockPort >= vsockPortAny {
-				return fmt.Errorf("routes[%d]: vsock_port %d out of range",
-					i, r.VsockPort)
-			}
-		}
-	case ModeTCP:
-		if len(il.Routes) > 0 {
-			return fmt.Errorf("routes not allowed with mode: tcp")
-		}
-		if il.TargetCID < minCID {
-			return fmt.Errorf("target_cid %d must be >= %d",
-				il.TargetCID, minCID)
-		}
-		if il.TargetPort == 0 || il.TargetPort >= vsockPortAny {
-			return fmt.Errorf("target_port %d out of range", il.TargetPort)
-		}
 	default:
-		return fmt.Errorf("mode %q must be %q, %q, or %q",
-			il.Mode, ModeHTTPHost, ModeTLSSNI, ModeTCP)
+		return fmt.Errorf("mode %q must be %q or %q",
+			il.Mode, ModeHTTPHost, ModeTLSSNI)
+	}
+	if len(il.Routes) == 0 {
+		return errors.New("at least one route required")
+	}
+	seenHost := make(map[string]bool)
+	for i := range il.Routes {
+		r := &il.Routes[i]
+		if r.Hostname == "" {
+			return fmt.Errorf("routes[%d]: hostname must not be empty", i)
+		}
+		h := strings.ToLower(r.Hostname)
+		if seenHost[h] {
+			return fmt.Errorf(
+				"routes[%d]: duplicate hostname %q", i, r.Hostname)
+		}
+		seenHost[h] = true
+		if r.CID < minCID {
+			return fmt.Errorf("routes[%d]: cid %d must be >= %d",
+				i, r.CID, minCID)
+		}
+		if r.VsockPort == 0 || r.VsockPort >= vsockPortAny {
+			return fmt.Errorf("routes[%d]: vsock_port %d out of range",
+				i, r.VsockPort)
+		}
+	}
+	return nil
+}
+
+func (t *TCPToVsockListener) validate() error {
+	if t.Bind == "" {
+		return errors.New("bind must not be empty")
+	}
+	if t.Port <= 0 || t.Port > 65535 {
+		return fmt.Errorf("port %d out of range (1..65535)", t.Port)
+	}
+	if t.VsockCID < minCID {
+		return fmt.Errorf("vsock_cid %d must be >= %d", t.VsockCID, minCID)
+	}
+	if t.VsockPort == 0 || t.VsockPort >= vsockPortAny {
+		return fmt.Errorf("vsock_port %d out of range", t.VsockPort)
+	}
+	return nil
+}
+
+func (v *VsockToTCPListener) validate() error {
+	if v.Port == 0 || v.Port >= vsockPortAny {
+		return fmt.Errorf("port %d out of range", v.Port)
+	}
+	if v.Upstream == "" {
+		return errors.New("upstream must not be empty")
+	}
+	if err := validateHostPort(v.Upstream); err != nil {
+		return fmt.Errorf("upstream %w", err)
 	}
 	return nil
 }

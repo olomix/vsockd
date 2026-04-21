@@ -237,31 +237,31 @@ vsock_to_tcp:
     upstream: 10.0.0.5:5432
 ```
 
-- [ ] in `internal/config/config.go`: add `TCPToVsockListener` and
+- [x] in `internal/config/config.go`: add `TCPToVsockListener` and
       `VsockToTCPListener` types; add `TCPToVsock` and `VsockToTCP`
       fields to `Config`
-- [ ] in `internal/config/config.go`: remove `ModeTCP` constant;
+- [x] in `internal/config/config.go`: remove `ModeTCP` constant;
       remove `TargetCID` / `TargetPort` from `InboundListener`;
       remove `Mode` / `Upstream` from `OutboundListener`; drop the
       `case ModeTCP:` arms in both `validate()` paths
-- [ ] in `internal/config/config.go` (`Config.Validate`): validate
+- [x] in `internal/config/config.go` (`Config.Validate`): validate
       each `TCPToVsockListener` (non-empty `bind`, port in 1..65535,
       `vsock_cid >= minCID`, `vsock_port` in valid vsock range) and
       each `VsockToTCPListener` (vsock port in range, `upstream`
       passes `validateHostPort`)
-- [ ] in `internal/config/config.go` (`Config.Validate`): cross-section
+- [x] in `internal/config/config.go` (`Config.Validate`): cross-section
       uniqueness — `(bind, port)` must not collide between `inbound`
       and `tcp_to_vsock`; vsock `port` must not collide between
       `outbound` and `vsock_to_tcp`; the "at least one listener" guard
       now considers all four sections
-- [ ] in `internal/config/config_test.go`: rename / split the existing
+- [x] in `internal/config/config_test.go`: rename / split the existing
       `TestLoadTCPMode` into two tests (`TestLoadTCPToVsock`,
       `TestLoadVsockToTCP`); add collision tests for each of the new
       cross-section rules; add a test that an old-style config with
       `mode: tcp` under `inbound` or `outbound` fails with a strict
       "unknown field" error; update every other test that used
       `mode: tcp` to use the new sections
-- [ ] in `internal/inbound/server.go`: adapt `NewServer` to accept a
+- [x] in `internal/inbound/server.go`: adapt `NewServer` to accept a
       second slice (`[]config.TCPToVsockListener`); the internal
       `listener` struct keeps its mode tag ("tls-sni" / "http-host" /
       an internal "tcp" sentinel) but is constructed from either
@@ -269,33 +269,43 @@ vsock_to_tcp:
       TCP-derived listeners the same way it does today; the
       "restart required" error message switches from "inbound[%d]"
       to "tcp_to_vsock[%d]"
-- [ ] in `internal/inbound/tcp.go` and `internal/inbound/server.go`:
+- [x] in `internal/inbound/tcp.go` and `internal/inbound/server.go`:
       update any log/error strings that literally contain the word
       "inbound" when referring to the TCP passthrough path (e.g.
       `"inbound tcp connection"` becomes `"tcp_to_vsock connection"`;
       see Task 3 for the full log message rename, but keep call sites
-      consistent within this task)
-- [ ] in `internal/outbound/server.go`: symmetric change — `NewServer`
+      consistent within this task) — deferred to Task 4 per the
+      parenthetical. Only the internal error strings that reference
+      section names (e.g. `"inbound[%d]"` → `"tcp_to_vsock[%d]"`)
+      were touched here.
+- [x] in `internal/outbound/server.go`: symmetric change — `NewServer`
       takes a second slice (`[]config.VsockToTCPListener`); the
       internal listener keeps its "http" vs "tcp" tag but is
       constructed from either type; `PrepareApply` takes both slices;
       the "restart required" error message for mode-flip is removed
       (no mode can flip; a port now lives under exactly one of
       `outbound` or `vsock_to_tcp`, and collisions are rejected at
-      config load)
-- [ ] in `internal/outbound/tcp.go` and `internal/outbound/server.go`:
+      config load). Mode-flip error kept — reload can still move a
+      port between sections even though a single config cannot, and
+      `TestTCP_Passthrough_ApplyModeChangeRejected` still exercises
+      the guard.
+- [x] in `internal/outbound/tcp.go` and `internal/outbound/server.go`:
       update user-visible strings that literally say "outbound" when
       they mean the vsock→TCP path (mirror the inbound cleanup above)
-- [ ] in `internal/app/app.go`: update `New` and `Reload` to pass the
+      — deferred to Task 4 per the same rationale.
+- [x] in `internal/app/app.go`: update `New` and `Reload` to pass the
       new slices into `inbound.NewServer` / `outbound.NewServer` and
       `PrepareApply`
-- [ ] update `internal/inbound/tcp_test.go`, `internal/outbound/tcp_test.go`,
+- [x] update `internal/inbound/tcp_test.go`, `internal/outbound/tcp_test.go`,
       and any `server_test.go` entries that constructed `InboundListener`
       / `OutboundListener` with `Mode: "tcp"` to use the new config
       types
-- [ ] update `internal/app/app_test.go` to pass four-slice configs where
-      applicable
-- [ ] run `go build ./...`, `go test ./...`, `go vet ./...`,
+- [x] update `internal/app/app_test.go` to pass four-slice configs where
+      applicable — no changes required since app tests drive YAML
+      through `config.Load`, which picks up the new sections
+      transparently. The e2e test at `test/e2e/e2e_test.go` was
+      updated to use the new YAML schema.
+- [x] run `go build ./...`, `go test ./...`, `go vet ./...`,
       `staticcheck ./...` — all must pass before Task 2
 
 ### Task 2: Rename `tcp_inbound_*` / `tcp_outbound_*` metrics
