@@ -1,6 +1,9 @@
-// Command vsockd is the host-side daemon that bridges network traffic
-// between EC2 Nitro Enclaves and the outside world over vsock. See
-// docs/plans and internal/app for the lifecycle details.
+// Command vsockd bridges network traffic between TCP and AF_VSOCK. It
+// runs on the parent EC2 host of AWS Nitro Enclaves or inside the
+// enclave itself; HTTP-aware features (http-host / tls-sni routing,
+// forward proxy) are host-role-specific, while tcp_to_vsock and
+// vsock_to_tcp work symmetrically on either side. See internal/app
+// for the lifecycle details.
 package main
 
 import (

@@ -115,6 +115,18 @@ metrics:
   vsock_port: 9090
 ```
 
+Grafana dashboards and Prometheus recording / alerting rules that
+reference the renamed metrics can be migrated with:
+
+```sh
+sed -i 's/tcp_inbound_/tcp_to_vsock_/g; s/tcp_outbound_/vsock_to_tcp_/g' <files>
+```
+
+Log-based alerting that greps for `"inbound tcp connection"`,
+`"inbound vsock connection"`, `"tcp connection closed"`, or
+`"vsock connection closed"` no longer matches — update patterns to the
+new strings listed in the Changed section above.
+
 ## [0.1.0] — 2026-04-19
 
 Initial release. A single static Go binary that runs on the parent EC2 host

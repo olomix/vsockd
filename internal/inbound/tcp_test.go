@@ -761,62 +761,77 @@ func TestInboundTCP_DialCancelledByShutdown(t *testing.T) {
 // accepting the reload would leave traffic flowing to the previous
 // enclave while config_reloads_total{result="success"} ticks up.
 func TestInboundTCP_ApplyTargetChangeReturnsClearError(t *testing.T) {
-	port := func() int {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
-		p := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		return p
-	}()
+	cases := []struct {
+		name      string
+		newCID    uint32
+		newPort   uint32
+	}{
+		{name: "vsock_port change", newCID: 16, newPort: 2},
+		{name: "vsock_cid change", newCID: 17, newPort: 1},
+		{name: "both change", newCID: 17, newPort: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			port := func() int {
+				l, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				p := l.Addr().(*net.TCPAddr).Port
+				_ = l.Close()
+				return p
+			}()
 
-	m := metrics.New()
-	tcpCfg := []config.TCPToVsockListener{{
-		Bind:      "127.0.0.1",
-		Port:      port,
-		VsockCID:  16,
-		VsockPort: 1,
-	}}
-	s, err := NewServer(nil, tcpCfg, vsockconn.NewLoopbackDialer(
-		vsockconn.NewRegistry(), 2), m, discardLogger())
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		cancel()
-		sc, scancel := context.WithTimeout(
-			context.Background(), 2*time.Second)
-		defer scancel()
-		_ = s.Shutdown(sc)
-	})
-	if err := s.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+			m := metrics.New()
+			tcpCfg := []config.TCPToVsockListener{{
+				Bind:      "127.0.0.1",
+				Port:      port,
+				VsockCID:  16,
+				VsockPort: 1,
+			}}
+			s, err := NewServer(nil, tcpCfg, vsockconn.NewLoopbackDialer(
+				vsockconn.NewRegistry(), 2), m, discardLogger())
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancel()
+				sc, scancel := context.WithTimeout(
+					context.Background(), 2*time.Second)
+				defer scancel()
+				_ = s.Shutdown(sc)
+			})
+			if err := s.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
 
-	updated := []config.TCPToVsockListener{{
-		Bind:      "127.0.0.1",
-		Port:      port,
-		VsockCID:  16,
-		VsockPort: 2, // port change only
-	}}
-	err = s.Apply(nil, updated)
-	if err == nil {
-		t.Fatal("Apply with changed vsock_port returned nil, want error")
-	}
-	if !strings.Contains(err.Error(), "restart required") {
-		t.Fatalf("Apply error = %q; want mention of restart required",
-			err.Error())
-	}
+			updated := []config.TCPToVsockListener{{
+				Bind:      "127.0.0.1",
+				Port:      port,
+				VsockCID:  tc.newCID,
+				VsockPort: tc.newPort,
+			}}
+			err = s.Apply(nil, updated)
+			if err == nil {
+				t.Fatal("Apply with changed target returned nil, want error")
+			}
+			if !strings.Contains(err.Error(), "restart required") {
+				t.Fatalf("Apply error = %q; want mention of restart required",
+					err.Error())
+			}
 
-	// Running listener must keep its original target.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.listeners) != 1 {
-		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
-	}
-	if got := s.listeners[0].targetPort.Load(); got != 1 {
-		t.Fatalf("targetPort = %d; want original 1 preserved", got)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(s.listeners) != 1 {
+				t.Fatalf("listeners len = %d, want 1", len(s.listeners))
+			}
+			if got := s.listeners[0].targetPort.Load(); got != 1 {
+				t.Fatalf("targetPort = %d; want original 1 preserved", got)
+			}
+			if got := s.listeners[0].targetCID.Load(); got != 16 {
+				t.Fatalf("targetCID = %d; want original 16 preserved", got)
+			}
+		})
 	}
 }

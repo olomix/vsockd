@@ -274,12 +274,70 @@ inbound:
 shutdown_grace: 1s
 `, inPort)
 	// startApp passes MetricsAddr="" and does not set MetricsVsockPort.
-	_, _, _ = startApp(t, body, "")
+	a, _, _ := startApp(t, body, "")
 
-	// An ephemeral :9090 assertion would be unreliable on shared CI, so
-	// instead we rely on the positive TestMetricsEndpoint path to confirm
-	// that the endpoint DOES bind when an address is set. A quiet Start is
-	// the contract for the disabled case.
+	if ln := a.MetricsListener(); ln != nil {
+		t.Fatalf("MetricsListener() = %v, want nil when disabled",
+			ln.Addr())
+	}
+}
+
+// TestMetricsStartRejectsBothSet asserts the defensive check in
+// App.Start triggers when a direct API caller sets both transports.
+func TestMetricsStartRejectsBothSet(t *testing.T) {
+	dir := t.TempDir()
+	inPort := allocPort(t)
+	cfgPath := writeConfig(t, dir, fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort))
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	_, dialer, listenFn := loopbackBackend(2)
+	a, err := app.New(app.Options{
+		ConfigPath:       cfgPath,
+		Config:           cfg,
+		Logger:           discardLogger(),
+		MetricsAddr:      "127.0.0.1:0",
+		MetricsVsockPort: 9090,
+		VsockDialer:      dialer,
+		VsockListenFn:    listenFn,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err = a.Start(ctx)
+	if err == nil {
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 2*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+		t.Fatal("Start succeeded with both MetricsAddr and "+
+			"MetricsVsockPort set; want error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Start error = %q; want mutually-exclusive mention",
+			err.Error())
+	}
+	// Inbound port must not stay bound after the guard rejects Start.
+	probe, derr := net.DialTimeout("tcp",
+		fmt.Sprintf("127.0.0.1:%d", inPort), 200*time.Millisecond)
+	if derr == nil {
+		probe.Close()
+		t.Fatalf("inbound port %d still accepting after Start failure",
+			inPort)
+	}
 }
 
 // TestMetricsOverVsock starts the app with MetricsVsockPort set and

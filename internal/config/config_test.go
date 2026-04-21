@@ -737,6 +737,12 @@ func TestLoadExample(t *testing.T) {
 	if len(cfg.Outbound) == 0 {
 		t.Fatalf("example should have at least one outbound listener")
 	}
+	if len(cfg.TCPToVsock) == 0 {
+		t.Fatalf("example should have at least one tcp_to_vsock listener")
+	}
+	if len(cfg.VsockToTCP) == 0 {
+		t.Fatalf("example should have at least one vsock_to_tcp listener")
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {

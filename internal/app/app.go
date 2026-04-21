@@ -126,6 +126,11 @@ func (a *App) Inbound() *inbound.Server { return a.inbound }
 // Outbound returns the outbound server. Used by tests.
 func (a *App) Outbound() *outbound.Server { return a.out }
 
+// MetricsListener returns the active /metrics net.Listener, or nil when
+// the endpoint is disabled. Used by tests to verify the disabled path
+// does not quietly bind a listener.
+func (a *App) MetricsListener() net.Listener { return a.metricsLn }
+
 // Start binds all inbound and outbound listeners and launches the metrics
 // HTTP endpoint if configured. ctx is retained by the servers for the life
 // of their accept loops; cancelling ctx does NOT trigger a graceful
@@ -134,22 +139,21 @@ func (a *App) Start(ctx context.Context) error {
 	a.reloadMu.Lock()
 	defer a.reloadMu.Unlock()
 
+	// Mutual exclusion is already enforced in config.Validate and
+	// resolveMetrics; a defensive check here catches any direct-API misuse
+	// that bypassed those paths. Run before subsystem Start so misuse
+	// surfaces without side effects.
+	if a.opts.MetricsAddr != "" && a.opts.MetricsVsockPort != 0 {
+		return errors.New(
+			"app: MetricsAddr and MetricsVsockPort are mutually exclusive")
+	}
+
 	if err := a.inbound.Start(ctx); err != nil {
 		return fmt.Errorf("inbound start: %w", err)
 	}
 	if err := a.out.Start(ctx); err != nil {
 		_ = a.inbound.Shutdown(context.Background())
 		return fmt.Errorf("outbound start: %w", err)
-	}
-
-	// Mutual exclusion is already enforced in config.Validate and
-	// resolveMetrics; a defensive check here catches any direct-API misuse
-	// that bypassed those paths.
-	if a.opts.MetricsAddr != "" && a.opts.MetricsVsockPort != 0 {
-		_ = a.inbound.Shutdown(context.Background())
-		_ = a.out.Shutdown(context.Background())
-		return errors.New(
-			"app: MetricsAddr and MetricsVsockPort are mutually exclusive")
 	}
 
 	metricsSummary := "disabled"

@@ -1,13 +1,16 @@
-// Package inbound implements the host-side TCP listeners that forward
-// incoming connections to enclave vsock endpoints.
+// Package inbound implements the TCP listeners that forward incoming
+// connections to vsock endpoints.
 //
-// Listeners run in one of three modes:
+// Listeners run in one of two HTTP-aware modes, configured under the
+// inbound YAML section:
 //
 //   - http-host sniffs the HTTP Host header and routes by hostname.
 //   - tls-sni sniffs the TLS ClientHello SNI extension and forwards the
 //     original bytes untouched (the enclave owns the certificate).
-//   - tcp (mode: tcp) pipes bytes bidirectionally to a fixed enclave
-//     (cid, vsock_port) with no application-layer parsing.
+//
+// Raw byte-level passthrough lives in the separate top-level
+// tcp_to_vsock YAML section (see tcp.go); it shares this package's
+// Server and accept loop but has no routing layer.
 package inbound
 
 import (
