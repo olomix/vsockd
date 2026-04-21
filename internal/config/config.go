@@ -19,9 +19,11 @@ import (
 )
 
 // Inbound mode values; the YAML mode field must be one of these.
+// ModeTCP is also valid for outbound listeners.
 const (
 	ModeHTTPHost = "http-host"
 	ModeTLSSNI   = "tls-sni"
+	ModeTCP      = "tcp"
 )
 
 // Log format values; empty means the caller picks a default.
@@ -29,6 +31,12 @@ const (
 	LogFormatJSON = "json"
 	LogFormatText = "text"
 	LogFormatAuto = "auto"
+)
+
+// Log level values accepted in YAML / env var. Empty means info.
+const (
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
 )
 
 // VSOCK reserves CIDs 0..2 (hypervisor/local/host). Enclave CIDs start at 3.
@@ -45,14 +53,21 @@ type Config struct {
 	Metrics       MetricsConfig      `yaml:"metrics"`
 	ShutdownGrace Duration           `yaml:"shutdown_grace"`
 	LogFormat     string             `yaml:"log_format"`
+	LogLevel      string             `yaml:"log_level"`
 }
 
 // InboundListener terminates TCP on the host and routes to enclave vsocks.
+//
+// For mode=tcp: TargetCID/TargetPort point at a fixed enclave vsock endpoint
+// and Routes must be empty. For mode=http-host / tls-sni: Routes carry the
+// per-hostname vsock mappings and TargetCID/TargetPort must be zero.
 type InboundListener struct {
-	Bind   string  `yaml:"bind"`
-	Port   int     `yaml:"port"`
-	Mode   string  `yaml:"mode"`
-	Routes []Route `yaml:"routes"`
+	Bind       string  `yaml:"bind"`
+	Port       int     `yaml:"port"`
+	Mode       string  `yaml:"mode"`
+	Routes     []Route `yaml:"routes"`
+	TargetCID  uint32  `yaml:"target_cid"`
+	TargetPort uint32  `yaml:"target_port"`
 }
 
 // Route binds a hostname (HTTP Host header or TLS SNI) to an enclave endpoint.
@@ -62,11 +77,18 @@ type Route struct {
 	VsockPort uint32 `yaml:"vsock_port"`
 }
 
-// OutboundListener accepts vsock connections on a single port; each allowed
-// peer CID carries its own egress allowlist.
+// OutboundListener accepts vsock connections on a single port.
+//
+// Legacy (Mode == ""): each allowed peer CID carries its own egress allowlist
+// in CIDs for the HTTP forward-proxy handler. Upstream must be empty.
+//
+// Mode == "tcp": the listener is a raw passthrough dialing a fixed
+// Upstream host:port; CIDs must be empty.
 type OutboundListener struct {
-	Port uint32        `yaml:"port"`
-	CIDs []OutboundCID `yaml:"cids"`
+	Port     uint32        `yaml:"port"`
+	Mode     string        `yaml:"mode"`
+	Upstream string        `yaml:"upstream"`
+	CIDs     []OutboundCID `yaml:"cids"`
 }
 
 // OutboundCID is the per-CID egress policy scoped to one outbound listener.
@@ -161,31 +183,56 @@ func (c *Config) Validate() error {
 		}
 		seenPort[ob.Port] = true
 
-		if len(ob.CIDs) == 0 {
-			return fmt.Errorf("outbound[%d]: at least one cid required", i)
-		}
-		for j := range ob.CIDs {
-			oc := &ob.CIDs[j]
-			if oc.CID < minCID {
-				return fmt.Errorf("outbound[%d].cids[%d]: cid %d must be >= %d",
-					i, j, oc.CID, minCID)
-			}
-			if prev, ok := cidOwner[oc.CID]; ok {
+		switch ob.Mode {
+		case "":
+			if ob.Upstream != "" {
 				return fmt.Errorf(
-					"outbound[%d].cids[%d]: cid %d already listed under outbound port %d",
-					i, j, oc.CID, prev)
+					"outbound[%d]: upstream only valid with mode: tcp", i)
 			}
-			cidOwner[oc.CID] = ob.Port
-			if len(oc.AllowedHosts) == 0 {
-				return fmt.Errorf("outbound[%d].cids[%d]: allowed_hosts must not be empty",
-					i, j)
+			if len(ob.CIDs) == 0 {
+				return fmt.Errorf("outbound[%d]: at least one cid required", i)
 			}
-			for k, pat := range oc.AllowedHosts {
-				if err := validatePattern(pat); err != nil {
-					return fmt.Errorf("outbound[%d].cids[%d].allowed_hosts[%d]: %w",
-						i, j, k, err)
+			for j := range ob.CIDs {
+				oc := &ob.CIDs[j]
+				if oc.CID < minCID {
+					return fmt.Errorf(
+						"outbound[%d].cids[%d]: cid %d must be >= %d",
+						i, j, oc.CID, minCID)
+				}
+				if prev, ok := cidOwner[oc.CID]; ok {
+					return fmt.Errorf(
+						"outbound[%d].cids[%d]: cid %d already listed under outbound port %d",
+						i, j, oc.CID, prev)
+				}
+				cidOwner[oc.CID] = ob.Port
+				if len(oc.AllowedHosts) == 0 {
+					return fmt.Errorf(
+						"outbound[%d].cids[%d]: allowed_hosts must not be empty",
+						i, j)
+				}
+				for k, pat := range oc.AllowedHosts {
+					if err := validatePattern(pat); err != nil {
+						return fmt.Errorf(
+							"outbound[%d].cids[%d].allowed_hosts[%d]: %w",
+							i, j, k, err)
+					}
 				}
 			}
+		case ModeTCP:
+			if len(ob.CIDs) > 0 {
+				return fmt.Errorf(
+					"outbound[%d]: cids not allowed with mode: tcp", i)
+			}
+			if ob.Upstream == "" {
+				return fmt.Errorf(
+					"outbound[%d]: upstream required for mode: tcp", i)
+			}
+			if err := validateHostPort(ob.Upstream); err != nil {
+				return fmt.Errorf("outbound[%d]: upstream %w", i, err)
+			}
+		default:
+			return fmt.Errorf("outbound[%d]: mode %q must be %q or empty",
+				i, ob.Mode, ModeTCP)
 		}
 	}
 
@@ -194,6 +241,13 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("log_format %q must be one of %q, %q, %q",
 			c.LogFormat, LogFormatJSON, LogFormatText, LogFormatAuto)
+	}
+
+	switch c.LogLevel {
+	case "", LogLevelDebug, LogLevelInfo:
+	default:
+		return fmt.Errorf("log_level %q must be %q or %q",
+			c.LogLevel, LogLevelDebug, LogLevelInfo)
 	}
 
 	if c.ShutdownGrace < 0 {
@@ -219,33 +273,69 @@ func (il *InboundListener) validate() error {
 	}
 	switch il.Mode {
 	case ModeHTTPHost, ModeTLSSNI:
+		if il.TargetCID != 0 || il.TargetPort != 0 {
+			return fmt.Errorf(
+				"target_cid/target_port only valid with mode: tcp")
+		}
+		if len(il.Routes) == 0 {
+			return errors.New("at least one route required")
+		}
+		seenHost := make(map[string]bool)
+		for i := range il.Routes {
+			r := &il.Routes[i]
+			if r.Hostname == "" {
+				return fmt.Errorf("routes[%d]: hostname must not be empty", i)
+			}
+			h := strings.ToLower(r.Hostname)
+			if seenHost[h] {
+				return fmt.Errorf(
+					"routes[%d]: duplicate hostname %q", i, r.Hostname)
+			}
+			seenHost[h] = true
+			if r.CID < minCID {
+				return fmt.Errorf("routes[%d]: cid %d must be >= %d",
+					i, r.CID, minCID)
+			}
+			if r.VsockPort == 0 || r.VsockPort >= vsockPortAny {
+				return fmt.Errorf("routes[%d]: vsock_port %d out of range",
+					i, r.VsockPort)
+			}
+		}
+	case ModeTCP:
+		if len(il.Routes) > 0 {
+			return fmt.Errorf("routes not allowed with mode: tcp")
+		}
+		if il.TargetCID < minCID {
+			return fmt.Errorf("target_cid %d must be >= %d",
+				il.TargetCID, minCID)
+		}
+		if il.TargetPort == 0 || il.TargetPort >= vsockPortAny {
+			return fmt.Errorf("target_port %d out of range", il.TargetPort)
+		}
 	default:
-		return fmt.Errorf("mode %q must be %q or %q",
-			il.Mode, ModeHTTPHost, ModeTLSSNI)
+		return fmt.Errorf("mode %q must be %q, %q, or %q",
+			il.Mode, ModeHTTPHost, ModeTLSSNI, ModeTCP)
 	}
-	if len(il.Routes) == 0 {
-		return errors.New("at least one route required")
-	}
+	return nil
+}
 
-	seenHost := make(map[string]bool)
-	for i := range il.Routes {
-		r := &il.Routes[i]
-		if r.Hostname == "" {
-			return fmt.Errorf("routes[%d]: hostname must not be empty", i)
-		}
-		h := strings.ToLower(r.Hostname)
-		if seenHost[h] {
-			return fmt.Errorf("routes[%d]: duplicate hostname %q", i, r.Hostname)
-		}
-		seenHost[h] = true
-		if r.CID < minCID {
-			return fmt.Errorf("routes[%d]: cid %d must be >= %d",
-				i, r.CID, minCID)
-		}
-		if r.VsockPort == 0 || r.VsockPort >= vsockPortAny {
-			return fmt.Errorf("routes[%d]: vsock_port %d out of range",
-				i, r.VsockPort)
-		}
+// validateHostPort checks a "host:port" string for the outbound TCP upstream.
+// host must be non-empty; port must be in 1..65535. Wildcards are not allowed
+// here (unlike the allowlist patterns).
+func validateHostPort(s string) error {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("%q not host:port: %w", s, err)
+	}
+	if host == "" {
+		return fmt.Errorf("%q: host must not be empty", s)
+	}
+	if strings.Contains(host, "*") {
+		return fmt.Errorf("%q: wildcards not allowed", s)
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("%q: invalid port %q", s, portStr)
 	}
 	return nil
 }

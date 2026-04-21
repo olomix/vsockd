@@ -126,28 +126,28 @@ backward-compatible.
 
 ### Task 1: Extend config schema with `mode: tcp` for inbound and outbound
 
-- [ ] in `internal/config/config.go`: add constant `ModeTCP = "tcp"`
-- [ ] extend `InboundListener` with `TargetCID uint32` (yaml
+- [x] in `internal/config/config.go`: add constant `ModeTCP = "tcp"`
+- [x] extend `InboundListener` with `TargetCID uint32` (yaml
   `target_cid`) and `TargetPort uint32` (yaml `target_port`) fields
-- [ ] extend `OutboundListener` with `Mode string` (yaml `mode`, empty
+- [x] extend `OutboundListener` with `Mode string` (yaml `mode`, empty
   means legacy HTTP forward-proxy) and `Upstream string` (yaml
   `upstream`) fields
-- [ ] extend `Config` with `LogLevel string` (yaml `log_level`; empty,
+- [x] extend `Config` with `LogLevel string` (yaml `log_level`; empty,
   `debug`, or `info`); add `LogLevelDebug` / `LogLevelInfo` constants
-- [ ] update `InboundListener.validate`: when `Mode == ModeTCP`, require
+- [x] update `InboundListener.validate`: when `Mode == ModeTCP`, require
   `TargetCID >= minCID`, require valid `TargetPort`, forbid `Routes`;
   when `Mode` is `http-host`/`tls-sni`, forbid `TargetCID`/`TargetPort`
-- [ ] update outbound validation: when `Mode == ModeTCP`, require
+- [x] update outbound validation: when `Mode == ModeTCP`, require
   non-empty `Upstream` that parses as `host:port` with a 1..65535 port,
   forbid `CIDs`; when `Mode` is empty (legacy HTTP), forbid `Upstream`
   and keep existing per-CID allowlist checks
-- [ ] validate `LogLevel` is one of "", "debug", "info"
-- [ ] add table-driven `config_test.go` cases: valid inbound
+- [x] validate `LogLevel` is one of "", "debug", "info"
+- [x] add table-driven `config_test.go` cases: valid inbound
   `mode: tcp`, valid outbound `mode: tcp`, missing `target_cid`,
   missing `upstream`, invalid `upstream` host:port, mixing `routes:`
   with `mode: tcp`, mixing `cids:` with `mode: tcp`, invalid
   `log_level`
-- [ ] run `go test ./internal/config/...` — must pass before next task
+- [x] run `go test ./internal/config/...` — must pass before next task
 
 ### Task 2: Wire dynamic log level (`-debug` flag, `VSOCKD_LOG_LEVEL`, yaml `log_level`)
 
