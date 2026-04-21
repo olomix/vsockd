@@ -1,3 +1,8 @@
+> **Note:** This document is a historical design doc. Its host-only
+> framing and original scope are preserved for context, but they no
+> longer reflect the current shape of `vsockd` — see `README.md` for
+> the source of truth.
+
 **Project: `vsockd` — a bidirectional proxy for AWS Nitro Enclaves**
 
 A single Go binary running on the parent EC2 host that bridges network traffic between the outside world and applications inside one or more AWS Nitro Enclaves over vsock.

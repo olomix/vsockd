@@ -597,7 +597,7 @@ hard breaking change. The entry must include:
 
 ### Task 9: Final cleanup — historical docs
 
-- [ ] optional: add a one-line note to `idea.md` saying the
+- [x] optional: add a one-line note to `idea.md` saying the
       host-only framing is historical; the current README is the
       source of truth. Don't rewrite the file — it's a design doc
       and its original scope is useful context for future readers.
