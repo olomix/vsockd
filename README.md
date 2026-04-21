@@ -339,9 +339,10 @@ are ever used as label values.
   route/CID tables atomically, and an outbound `mode: tcp` listener kept at
   the same port atomically picks up a new `upstream` — new connections see
   the new rules or upstream, in-flight connections keep the values they
-  started with. Changing the `mode` on an already-bound inbound bind:port
-  is rejected (restart required), and changing `target_cid` / `target_port`
-  on an existing inbound `mode: tcp` listener also requires a restart today.
+  started with. Changing the `mode` on an already-bound bind:port (inbound)
+  or vsock port (outbound) is rejected (restart required), and changing
+  `target_cid` / `target_port` on an existing inbound `mode: tcp` listener
+  also requires a restart today.
   A failed reload is logged, `config_reloads_total{result="failure"}`
   increments, and the running config is left untouched.
 - **Graceful shutdown.** On `SIGTERM` / `SIGINT` vsockd stops accepting new

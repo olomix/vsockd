@@ -229,11 +229,20 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 			return nil, fmt.Errorf("outbound[%d]: %w", i, err)
 		}
 		if cur, ok := existing[cfg.Port]; ok {
-			// Port alone keys the listener; updating cur.cfg would race
-			// with the accept-loop reader. Swap only the mutable state
-			// (matcher table for HTTP mode, upstream for TCP mode).
+			// cur.cfg.Mode is what run() dispatches on and cannot be mutated
+			// safely while the accept loop runs. Mirror the inbound guard:
+			// flipping between HTTP and tcp on the same port at runtime is
+			// not supported; operator must restart the daemon.
+			if cur.cfg.Mode != cfg.Mode {
+				cleanup()
+				return nil, fmt.Errorf(
+					"outbound[%d]: cannot change mode on port %d from %q to %q at runtime; restart required",
+					i, cfg.Port, cur.cfg.Mode, cfg.Mode)
+			}
+			// Port+mode matches; swap only the mutable state (matcher table
+			// for HTTP mode, upstream for TCP mode).
 			sw := applySwap{listener: cur, matchers: newLn.matchersSnapshot()}
-			if cfg.Mode == config.ModeTCP && cur.cfg.Mode == config.ModeTCP {
+			if cfg.Mode == config.ModeTCP {
 				u := newLn.upstreamSnapshot()
 				sw.upstream = &u
 			}

@@ -690,3 +690,52 @@ func TestTCP_Passthrough_ConcurrentConnections(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestTCP_Passthrough_ApplyModeChangeRejected verifies that flipping an
+// outbound listener between HTTP forward-proxy mode and TCP passthrough on
+// the same port via Apply/SIGHUP is refused with a descriptive error and
+// leaves the running listener intact. Silently accepting this reload would
+// leave run() dispatching on the stale cfg.Mode while the swap wipes the
+// matcher table — denying every subsequent connection with no operator
+// signal.
+func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const vsockPort uint32 = 8080
+
+	m := metrics.New()
+	httpCfg := []config.OutboundListener{{
+		Port: vsockPort,
+		CIDs: []config.OutboundCID{
+			{CID: 16, AllowedHosts: []string{"example.com:443"}},
+		},
+	}}
+	s := startServer(t, httpCfg, newLoopbackListenFunc(reg, hostCID), m)
+
+	tcpCfg := []config.OutboundListener{{
+		Port:     vsockPort,
+		Mode:     config.ModeTCP,
+		Upstream: "127.0.0.1:9",
+	}}
+	err := s.Apply(tcpCfg)
+	if err == nil {
+		t.Fatal("Apply with changed mode returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "cannot change mode") {
+		t.Fatalf("Apply error = %q; want mention of mode change",
+			err.Error())
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.listeners) != 1 {
+		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
+	}
+	if s.listeners[0].cfg.Mode != "" {
+		t.Fatalf("listener mode = %q; want original HTTP mode preserved",
+			s.listeners[0].cfg.Mode)
+	}
+	if got := s.listeners[0].matchersSnapshot(); len(got) != 1 {
+		t.Fatalf("matcher table size = %d; want 1 (original CID preserved)",
+			len(got))
+	}
+}
