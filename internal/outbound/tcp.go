@@ -27,10 +27,18 @@ var shuttleDrainTimeout = 30 * time.Second
 // no allowlist, and no per-peer authorization: TCP-mode listeners trust
 // every connection the vsock port accepts.
 //
+// upstreamAddr is captured by the accept loop immediately after
+// Accept returns, before the handler goroutine starts, so a reload
+// that lands after the capture never redirects this connection.
+// The converse window — a reload landing in the narrow handful of
+// instructions between Accept returning and the capture — is not
+// closed; doing so would require serialising reloads against a
+// blocking Accept.
+//
 // Byte counting follows the enclave's perspective:
 //   - up is bytes leaving the enclave (vsock client → TCP upstream)
 //   - down is bytes arriving at the enclave (TCP upstream → vsock client)
-func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn) {
+func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr string) {
 	defer c.Close()
 	l.server.trackConn(c)
 	defer l.server.untrackConn(c)
@@ -38,7 +46,6 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn) {
 	peerCID := c.PeerCID()
 	peerPort := c.PeerPort()
 	listenPort := l.cfg.Port
-	upstreamAddr := l.upstreamSnapshot()
 
 	l.server.metric.TCPOutboundConnections.Inc()
 	l.server.logger.Debug("inbound vsock connection",

@@ -493,11 +493,27 @@ func (l *listener) run(ctx context.Context) {
 			continue
 		}
 		tempDelay = 0
+		// Capture the upstream here, inside the accept loop, rather than
+		// in the handler goroutine. This closes the goroutine-scheduling
+		// window that would otherwise let a SIGHUP reload swap the
+		// atomic upstream between Accept returning and the handler's
+		// first instruction. A reload that lands in the narrow
+		// instruction-level window between Accept and this load can
+		// still redirect this connection; closing that remaining window
+		// would require serialising reloads against a potentially
+		// indefinitely blocking Accept. See the "existing ones drain"
+		// contract in the e2e reload test; without this capture, the
+		// contract would hold only for connections that have reached
+		// the DialContext line.
+		var tcpUpstream string
+		if l.cfg.Mode == config.ModeTCP {
+			tcpUpstream = l.upstreamSnapshot()
+		}
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
 			if l.cfg.Mode == config.ModeTCP {
-				l.handleTCP(ctx, c)
+				l.handleTCP(ctx, c, tcpUpstream)
 				return
 			}
 			l.handle(ctx, c)
