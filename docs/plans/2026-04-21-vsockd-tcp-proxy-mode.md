@@ -200,29 +200,29 @@ backward-compatible.
 
 ### Task 4: Implement TCP inbound handler (TCP → vsock target)
 
-- [ ] create `internal/inbound/tcp.go` analogous to the outbound TCP
+- [x] create `internal/inbound/tcp.go` analogous to the outbound TCP
   handler but in the reverse direction
-- [ ] dial the vsock target with the project's `vsockconn.Dialer` so
+- [x] dial the vsock target with the project's `vsockconn.Dialer` so
   tests can use loopback
-- [ ] on accept of a TCP peer, if debug enabled, emit
+- [x] on accept of a TCP peer, if debug enabled, emit
   `slog.Debug("inbound tcp connection", "remote", remoteAddr,
   "listen", listenAddr)`
-- [ ] run bidirectional `io.Copy` with captured byte counts, same
+- [x] run bidirectional `io.Copy` with captured byte counts, same
   half-close handling as Task 3
-- [ ] on close, if debug enabled, emit
+- [x] on close, if debug enabled, emit
   `slog.Debug("tcp connection closed", "remote", remoteAddr,
   "listen", listenAddr, "total_bytes", upBytes+downBytes)`
-- [ ] update `internal/inbound/server.go` so `mode: tcp` listeners
+- [x] update `internal/inbound/server.go` so `mode: tcp` listeners
   bypass sniff/route and dispatch to this handler
-- [ ] register with the active-conn map for graceful shutdown
-- [ ] in `tcp_test.go`: start a loopback vsock target (echo), start the
+- [x] register with the active-conn map for graceful shutdown
+- [x] in `tcp_test.go`: start a loopback vsock target (echo), start the
   TCP inbound handler on `127.0.0.1:<ephemeral>`, connect a TCP client,
   verify bytes round-trip both ways
-- [ ] verify byte counting and debug log emission via a captured
+- [x] verify byte counting and debug log emission via a captured
   `slog.Handler`
-- [ ] failure-mode tests: vsock dial fails, client disconnects
+- [x] failure-mode tests: vsock dial fails, client disconnects
   mid-stream, context cancel
-- [ ] run `go test -race ./internal/inbound/...` — must pass before
+- [x] run `go test -race ./internal/inbound/...` — must pass before
   next task
 
 ### Task 5: Add metrics for TCP-mode listeners

@@ -371,17 +371,29 @@ type listener struct {
 	// routes holds the lowercase-hostname → Route map. Stored as an atomic
 	// pointer so Apply can swap the whole table without blocking the hot
 	// path, and in-flight connections keep a stable reference to the map
-	// they observed at accept time.
+	// they observed at accept time. Unused for mode=tcp listeners.
 	routes atomic.Pointer[map[string]config.Route]
+
+	// targetCID / targetPort hold the live vsock target for mode=tcp
+	// listeners. Atomic so a future SIGHUP reload can swap the target
+	// without tearing down the TCP accept loop and to keep concurrent
+	// handleTCP reads race-free. Unused for http-host/tls-sni listeners.
+	targetCID  atomic.Uint32
+	targetPort atomic.Uint32
 }
 
 func newListener(cfg config.InboundListener, s *Server) (*listener, error) {
 	switch cfg.Mode {
-	case config.ModeHTTPHost, config.ModeTLSSNI:
+	case config.ModeHTTPHost, config.ModeTLSSNI, config.ModeTCP:
 	default:
 		return nil, fmt.Errorf("unknown mode %q", cfg.Mode)
 	}
 	l := &listener{cfg: cfg, server: s}
+	if cfg.Mode == config.ModeTCP {
+		l.targetCID.Store(cfg.TargetCID)
+		l.targetPort.Store(cfg.TargetPort)
+		return l, nil
+	}
 	rm := buildRouteMap(cfg.Routes)
 	l.routes.Store(&rm)
 	return l, nil
@@ -467,6 +479,10 @@ func (l *listener) run(ctx context.Context) {
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
+			if l.cfg.Mode == config.ModeTCP {
+				l.handleTCP(ctx, c)
+				return
+			}
 			l.handle(ctx, c)
 		}()
 	}
