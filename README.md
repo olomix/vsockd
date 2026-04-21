@@ -40,12 +40,22 @@ this is enforced at config-load time.
                                     │   └─ dial vsock                │
                                     │   └─ replay ClientHello + copy │
                                     │                                │
+  external client ── TCP ────────▶  │  inbound mode: tcp             │
+  (any protocol)                    │   └─ no sniff, no routing      │ ── vsock(target_cid,   ─▶ enclave
+                                    │   └─ dial fixed vsock target   │      target_port)
+                                    │   └─ raw byte pipe             │
+                                    │                                │
   external service ◀── TCP ──────── │  outbound listener             │
   (e.g. api.stripe.com:443)         │   └─ accept vsock, read peer CID
                                     │   └─ CID in port's CID set?    │ ◀── vsock(port) ─────── enclave
                                     │   └─ read HTTP request         │     (CONNECT/GET/POST)
                                     │   └─ allowlist(host:port)?     │
                                     │   └─ dial + stream             │
+                                    │                                │
+  external service ◀── TCP ──────── │  outbound mode: tcp            │
+  (any protocol, fixed upstream)    │   └─ no HTTP parse, no allowlist
+                                    │   └─ dial fixed upstream       │ ◀── vsock(port) ─────── enclave
+                                    │   └─ raw byte pipe             │      (raw bytes)
                                     │                                │
                                     │  /metrics (Prometheus)         │
                                     └────────────────────────────────┘
@@ -210,21 +220,33 @@ HTTP listeners.
 ### Debug logging
 
 Setting the log level to `debug` emits one structured log event per TCP
-connection on open and close. Byte totals are reported on close.
+connection on open and close. Byte totals are reported on close. The
+shapes below show the message and the structured attrs; the actual
+wire format depends on `-log-format` (JSON by default, text for a TTY).
 
-Vsock-side (outbound `mode: tcp`):
-
-```
-DEBUG inbound vsock connection cid=3 port=1234 listen_port=9000
-DEBUG vsock connection closed  cid=3 port=1234 listen_port=9000 total_bytes=12345
-```
-
-TCP-side (inbound `mode: tcp`):
+Vsock-side (outbound `mode: tcp`), attrs: `cid`, `port`, `listen_port`,
+`total_bytes` (on close only):
 
 ```
-DEBUG inbound tcp connection remote=192.168.1.10:54321 listen=0.0.0.0:5432
-DEBUG tcp connection closed   remote=192.168.1.10:54321 listen=0.0.0.0:5432 total_bytes=12345
+level=DEBUG msg="inbound vsock connection" cid=3 port=1234 listen_port=9000
+level=DEBUG msg="vsock connection closed"  cid=3 port=1234 listen_port=9000 total_bytes=12345
 ```
+
+TCP-side (inbound `mode: tcp`), attrs: `remote`, `listen`, `total_bytes`
+(on close only):
+
+```
+level=DEBUG msg="inbound tcp connection" remote=192.168.1.10:54321 listen=0.0.0.0:5432
+level=DEBUG msg="tcp connection closed"  remote=192.168.1.10:54321 listen=0.0.0.0:5432 total_bytes=12345
+```
+
+Upstream dial failures are logged at `WARN` independent of the debug
+setting, so alerts keyed on level pick them up. Outbound attrs:
+`cid`, `port`, `listen_port`, `upstream`, `err`. Inbound attrs:
+`remote`, `listen`, `target_cid`, `target_port`, `err`. Dials
+cancelled by `Shutdown` during graceful teardown do not emit the warn
+line or increment `tcp_*_errors_total{reason=dial_fail}` — they are
+expected shutdown artefacts rather than upstream faults.
 
 Three ways to toggle debug, in order of precedence:
 
@@ -314,10 +336,14 @@ are ever used as label values.
   against the running set. Listeners whose `(bind, port)` disappeared are
   closed (existing connections continue until they end naturally). New
   listeners are started. Listeners whose bind:port is unchanged swap their
-  route/CID tables atomically — new connections see the new rules, in-flight
-  connections keep the rules they started with. A failed reload is logged,
-  `config_reloads_total{result="failure"}` increments, and the running
-  config is left untouched.
+  route/CID tables atomically, and an outbound `mode: tcp` listener kept at
+  the same port atomically picks up a new `upstream` — new connections see
+  the new rules or upstream, in-flight connections keep the values they
+  started with. Changing the `mode` on an already-bound inbound bind:port
+  is rejected (restart required), and changing `target_cid` / `target_port`
+  on an existing inbound `mode: tcp` listener also requires a restart today.
+  A failed reload is logged, `config_reloads_total{result="failure"}`
+  increments, and the running config is left untouched.
 - **Graceful shutdown.** On `SIGTERM` / `SIGINT` vsockd stops accepting new
   connections, waits up to `shutdown_grace` (default 30s) for active
   connections to drain, then force-closes the rest. A second signal is not

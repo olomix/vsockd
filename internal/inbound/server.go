@@ -375,9 +375,11 @@ type listener struct {
 	routes atomic.Pointer[map[string]config.Route]
 
 	// targetCID / targetPort hold the live vsock target for mode=tcp
-	// listeners. Atomic so a future SIGHUP reload can swap the target
-	// without tearing down the TCP accept loop and to keep concurrent
-	// handleTCP reads race-free. Unused for http-host/tls-sni listeners.
+	// listeners. Atomic types keep concurrent handleTCP reads race-free
+	// and leave room to introduce an in-place target swap the same way
+	// the outbound side swaps upstream — today a SIGHUP that changes
+	// target_cid or target_port on an already-bound inbound listener
+	// requires a restart. Unused for http-host/tls-sni listeners.
 	targetCID  atomic.Uint32
 	targetPort atomic.Uint32
 }

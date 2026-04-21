@@ -471,12 +471,10 @@ func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	}
 }
 
-// TestTCP_Passthrough_RejectsCIDsInTCPMode ensures the server factory
-// does not accept a mode=tcp listener that also carries a CID list —
-// config.Validate already catches this, but a direct constructor call
-// bypasses validation.
-func TestTCP_Passthrough_RejectsCIDsInTCPMode(t *testing.T) {
-	// Sanity: newListener happily accepts a TCP config.
+// TestTCP_Passthrough_NewListenerAcceptsTCPConfig sanity-checks that the
+// direct constructor path builds a mode=tcp listener without going
+// through config.Validate.
+func TestTCP_Passthrough_NewListenerAcceptsTCPConfig(t *testing.T) {
 	_, err := newListener(config.OutboundListener{
 		Port:     8080,
 		Mode:     config.ModeTCP,
@@ -487,9 +485,9 @@ func TestTCP_Passthrough_RejectsCIDsInTCPMode(t *testing.T) {
 	}
 }
 
-// TestTCP_Passthrough_UpstreamSwap verifies the atomic upstream field
-// reports the latest value after replaceUpstream, exercising the helper
-// the reload path will hook into.
+// TestTCP_Passthrough_UpstreamSwap verifies replaceUpstream — the helper
+// the reload path hooks into — atomically publishes a new upstream
+// visible to subsequent upstreamSnapshot reads.
 func TestTCP_Passthrough_UpstreamSwap(t *testing.T) {
 	l, err := newListener(config.OutboundListener{
 		Port:     8080,
@@ -502,8 +500,8 @@ func TestTCP_Passthrough_UpstreamSwap(t *testing.T) {
 	if got := l.upstreamSnapshot(); got != "127.0.0.1:1" {
 		t.Errorf("initial upstream = %q", got)
 	}
-	replacement := "10.0.0.5:5432"
-	l.upstream.Store(&replacement)
+	const replacement = "10.0.0.5:5432"
+	l.replaceUpstream(replacement)
 	if got := l.upstreamSnapshot(); got != replacement {
 		t.Errorf("after swap upstream = %q, want %q", got, replacement)
 	}

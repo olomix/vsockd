@@ -52,14 +52,20 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn) {
 	defer cancel()
 	upstream, err := l.server.dialer.DialContext(dctx, "tcp", upstreamAddr)
 	if err != nil {
-		l.server.metric.TCPOutboundErrors.
-			WithLabelValues(metrics.TCPErrorDial).Inc()
-		l.server.logger.Warn("outbound tcp dial failed",
-			"cid", peerCID,
-			"port", peerPort,
-			"listen_port", listenPort,
-			"upstream", upstreamAddr,
-			"err", err)
+		// A dial cancelled by Shutdown (dialCtx done) is an expected teardown
+		// signal, not an upstream failure: skip the dial_fail metric and the
+		// warn-level log so shutdown does not look like an incident.
+		shutdownCancel := l.server.dialCtx.Err() != nil
+		if !shutdownCancel {
+			l.server.metric.TCPOutboundErrors.
+				WithLabelValues(metrics.TCPErrorDial).Inc()
+			l.server.logger.Warn("outbound tcp dial failed",
+				"cid", peerCID,
+				"port", peerPort,
+				"listen_port", listenPort,
+				"upstream", upstreamAddr,
+				"err", err)
+		}
 		l.server.logger.Debug("vsock connection closed",
 			"cid", peerCID,
 			"port", peerPort,
