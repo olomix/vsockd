@@ -351,11 +351,23 @@ type listener struct {
 
 	// matchers holds the authorized-CID → compiled allowlist table. Stored
 	// as an atomic pointer so Apply can swap the whole table at reload
-	// time without disturbing in-flight connections.
+	// time without disturbing in-flight connections. Only populated for
+	// legacy HTTP-mode listeners (cfg.Mode == "").
 	matchers atomic.Pointer[map[uint32]*allowlist.Matcher]
+
+	// upstream holds the live TCP upstream address for mode=tcp listeners.
+	// Atomic so SIGHUP reloads can swap the destination without tearing
+	// down the vsock accept loop. Unused for HTTP-mode listeners.
+	upstream atomic.Pointer[string]
 }
 
 func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
+	l := &listener{cfg: cfg, server: s}
+	if cfg.Mode == config.ModeTCP {
+		u := cfg.Upstream
+		l.upstream.Store(&u)
+		return l, nil
+	}
 	if len(cfg.CIDs) == 0 {
 		return nil, fmt.Errorf("port %d: no cids configured", cfg.Port)
 	}
@@ -372,7 +384,6 @@ func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
 		}
 		matchers[oc.CID] = m
 	}
-	l := &listener{cfg: cfg, server: s}
 	l.matchers.Store(&matchers)
 	return l, nil
 }
@@ -387,6 +398,17 @@ func (l *listener) matchersSnapshot() map[uint32]*allowlist.Matcher {
 
 func (l *listener) replaceMatchers(m map[uint32]*allowlist.Matcher) {
 	l.matchers.Store(&m)
+}
+
+// upstreamSnapshot returns the currently configured upstream host:port
+// for a TCP-mode listener. Safe to call concurrently with reloads: the
+// atomic pointer guarantees readers see one self-consistent value.
+func (l *listener) upstreamSnapshot() string {
+	p := l.upstream.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func (l *listener) bind() error {
@@ -436,6 +458,10 @@ func (l *listener) run(ctx context.Context) {
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
+			if l.cfg.Mode == config.ModeTCP {
+				l.handleTCP(ctx, c)
+				return
+			}
 			l.handle(ctx, c)
 		}()
 	}

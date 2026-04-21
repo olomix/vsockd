@@ -166,36 +166,36 @@ backward-compatible.
 
 ### Task 3: Implement TCP outbound handler (vsock → TCP upstream)
 
-- [ ] create `internal/outbound/tcp.go` exposing
+- [x] create `internal/outbound/tcp.go` exposing
   `handleTCP(ctx, listener config, conn vsockconn.Conn)` or equivalent
   wired from `server.go` when `Mode == config.ModeTCP`
-- [ ] dial `cfg.Upstream` using `net.Dialer` with a sane timeout
+- [x] dial `cfg.Upstream` using `net.Dialer` with a sane timeout
   (reuse any existing dial-timeout constant; otherwise 10s)
-- [ ] on accept, if debug enabled, emit
+- [x] on accept, if debug enabled, emit
   `slog.Debug("inbound vsock connection", "cid", peerCID,
   "port", peerPort, "listen_port", listenerPort)`
-- [ ] run bidirectional `io.Copy` in two goroutines; capture the
+- [x] run bidirectional `io.Copy` in two goroutines; capture the
   byte counts from both directions; wait for both to finish
-- [ ] on close, if debug enabled, emit
+- [x] on close, if debug enabled, emit
   `slog.Debug("vsock connection closed", "cid", peerCID,
   "port", peerPort, "listen_port", listenerPort,
   "total_bytes", upBytes+downBytes)`
-- [ ] half-close gracefully: when one side reaches EOF, `CloseWrite`
+- [x] half-close gracefully: when one side reaches EOF, `CloseWrite`
   the other side so the peer sees EOF (use `net.TCPConn.CloseWrite` and
   the vsock equivalent if available; otherwise fall through to `Close`)
-- [ ] update `internal/outbound/server.go` so TCP-mode listeners go
+- [x] update `internal/outbound/server.go` so TCP-mode listeners go
   through this handler; HTTP-mode listeners keep their existing path
-- [ ] make sure TCP listeners register with the same active-conn map
+- [x] make sure TCP listeners register with the same active-conn map
   used for graceful shutdown so `shutdown_grace` applies uniformly
-- [ ] in `tcp_test.go`: start a loopback vsock listener, start a TCP
+- [x] in `tcp_test.go`: start a loopback vsock listener, start a TCP
   echo server on `127.0.0.1:<ephemeral>`, run the handler, dial in
   from a loopback vsock client, verify bytes echo both ways
-- [ ] in `tcp_test.go`: verify byte count is captured accurately
+- [x] in `tcp_test.go`: verify byte count is captured accurately
   (transfer N bytes each way, check debug log output via a
   `slog.Handler` captured in the test)
-- [ ] in `tcp_test.go`: failure-mode tests — upstream dial fails
+- [x] in `tcp_test.go`: failure-mode tests — upstream dial fails
   (connection refused), client disconnects mid-stream, context cancel
-- [ ] run `go test -race ./internal/outbound/...` — must pass before
+- [x] run `go test -race ./internal/outbound/...` — must pass before
   next task
 
 ### Task 4: Implement TCP inbound handler (TCP → vsock target)

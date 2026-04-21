@@ -68,6 +68,11 @@ type loopbackConn struct {
 
 func (c *loopbackConn) PeerCID() uint32 { return c.peerCID }
 
+// PeerPort always returns 0 for loopback connections. The TCP emulation
+// does not carry a meaningful vsock source port, and callers treat 0 as
+// "unknown peer port" when emitting debug logs.
+func (c *loopbackConn) PeerPort() uint32 { return 0 }
+
 // CloseWrite forwards to the underlying net.Conn's CloseWrite when it
 // supports one (TCP does). Exposed because the proxy paths rely on a
 // half-close to preserve response flow after the client finishes sending.
