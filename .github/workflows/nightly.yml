@@ -13,7 +13,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+    steps:
+      - id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — building regardless of current nightly tag."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if nightly_sha=$(gh api "repos/${REPO}/commits/nightly" --jq '.sha' 2>/dev/null); then
+            if [ "$nightly_sha" = "$CURRENT_SHA" ]; then
+              echo "main is unchanged since last nightly (${CURRENT_SHA}) — skipping build."
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "main=${CURRENT_SHA}, nightly=${nightly_sha} — building."
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No existing nightly tag — building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
