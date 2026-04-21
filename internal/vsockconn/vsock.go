@@ -42,7 +42,11 @@ func (v *vsockListener) Accept() (Conn, error) {
 		return nil, fmt.Errorf(
 			"vsockconn: unexpected remote addr type %T", c.RemoteAddr())
 	}
-	return &vsockConn{Conn: c, peerCID: addr.ContextID}, nil
+	return &vsockConn{
+		Conn:     c,
+		peerCID:  addr.ContextID,
+		peerPort: addr.Port,
+	}, nil
 }
 
 func (v *vsockListener) Close() error   { return v.l.Close() }
@@ -50,10 +54,12 @@ func (v *vsockListener) Addr() net.Addr { return v.l.Addr() }
 
 type vsockConn struct {
 	net.Conn
-	peerCID uint32
+	peerCID  uint32
+	peerPort uint32
 }
 
-func (v *vsockConn) PeerCID() uint32 { return v.peerCID }
+func (v *vsockConn) PeerCID() uint32  { return v.peerCID }
+func (v *vsockConn) PeerPort() uint32 { return v.peerPort }
 
 // CloseWrite shuts down the write side of the underlying *vsock.Conn so
 // the peer observes EOF while still being able to send remaining bytes.

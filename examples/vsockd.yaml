@@ -1,10 +1,12 @@
 # vsockd example configuration.
 #
-# Two inbound listeners (HTTPS transparent SNI passthrough + plaintext HTTP
-# Host-based routing), a shared forward-proxy outbound port for two enclaves
-# with per-CID egress allowlists, plus a dedicated unrestricted port for a
-# test enclave. The schema is documented in internal/config/config.go and
-# validated strictly at load time.
+# Inbound listeners cover HTTPS transparent SNI passthrough, plaintext HTTP
+# Host-based routing, and a raw-TCP passthrough variant for non-HTTP
+# workloads (databases, gRPC, arbitrary protocols). Outbound includes a
+# shared forward-proxy port with per-CID egress allowlists, a dedicated
+# unrestricted port for a test enclave, and a raw-TCP passthrough port that
+# dials a fixed upstream. The schema is documented in
+# internal/config/config.go and validated strictly at load time.
 
 inbound:
   # HTTPS: terminate TCP on the host, extract SNI, pass the TLS record
@@ -29,6 +31,15 @@ inbound:
         cid: 16
         vsock_port: 8080
 
+  # Raw TCP passthrough (TCP → vsock). Accepts TCP on bind:port and pipes
+  # bytes to a fixed enclave vsock endpoint. No application-layer parsing,
+  # no allowlist — useful for databases, gRPC, or anything non-HTTP.
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 16
+    target_port: 5432
+
 outbound:
   # Shared forward-proxy vsock port used by two enclaves. Each CID carries
   # its own egress allowlist; a CID may not appear under more than one port.
@@ -49,6 +60,13 @@ outbound:
         allowed_hosts:
           - "*"
 
+  # Raw TCP passthrough (vsock → TCP). Accepts vsock on this port and
+  # pipes bytes to a fixed upstream host:port. No HTTP parsing, no
+  # allowlist; any enclave CID that connects reaches the upstream.
+  - port: 9000
+    mode: tcp
+    upstream: 10.0.0.5:5432
+
 metrics:
   bind: 0.0.0.0:9090
 
@@ -57,3 +75,9 @@ shutdown_grace: 30s
 
 # json | text | auto — "auto" picks text when stderr is a TTY.
 log_format: json
+
+# info | debug (default: info). Enables per-connection open/close debug
+# logs for mode=tcp listeners on both sides. Can also be set via the
+# `-debug` flag or the VSOCKD_LOG_LEVEL env var; precedence is
+# flag > env > yaml.
+log_level: info

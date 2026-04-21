@@ -28,6 +28,11 @@ type Conn interface {
 	// the Nitro hypervisor). For the loopback backend it is the value the
 	// dialing side passed to NewLoopbackDialer.
 	PeerCID() uint32
+	// PeerPort returns the remote endpoint's vsock port. For the real
+	// vsock backend this is the kernel-assigned source port. For the
+	// loopback backend it is 0 (no meaningful vsock port is carried over
+	// a TCP emulation of vsock).
+	PeerPort() uint32
 }
 
 // Dialer opens a connection to a (cid, port) pair. The inbound server uses

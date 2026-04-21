@@ -22,6 +22,13 @@ const (
 	DirectionIn  = "in"
 	DirectionOut = "out"
 
+	// Direction labels for TCP passthrough counters. `up` and `down` are
+	// symmetrical (the proxy does not attribute enclave-vs-host semantics
+	// to a raw TCP stream); their only purpose is to expose per-direction
+	// throughput so operators can spot half-duplex traffic patterns.
+	DirectionUp   = "up"
+	DirectionDown = "down"
+
 	OutboundResultAllowed = "allowed"
 	OutboundResultDenied  = "denied"
 	OutboundResultError   = "error"
@@ -29,11 +36,16 @@ const (
 	ReloadResultSuccess = "success"
 	ReloadResultFailure = "failure"
 
-	InboundErrorSniff   = "sniff"
-	InboundErrorRoute   = "route"
-	InboundErrorDial    = "dial"
-	InboundErrorCopy    = "copy"
-	InboundErrorAccept  = "accept"
+	InboundErrorSniff  = "sniff"
+	InboundErrorRoute  = "route"
+	InboundErrorDial   = "dial"
+	InboundErrorCopy   = "copy"
+	InboundErrorAccept = "accept"
+
+	// TCP passthrough error reasons. Fixed values keep the `reason` label
+	// bounded so a misbehaving upstream cannot inflate cardinality.
+	TCPErrorDial = "dial_fail"
+	TCPErrorCopy = "copy_error"
 
 	// CIDLabelUnauthorized is emitted on outbound_connections_total in place
 	// of the raw peer CID when a connection is rejected because the CID is
@@ -53,6 +65,17 @@ type Metrics struct {
 
 	OutboundConnections *prometheus.CounterVec
 	OutboundBytes       *prometheus.CounterVec
+
+	// TCP passthrough counters. Labels are kept minimal and bounded:
+	// direction ∈ {up, down}, reason ∈ {dial_fail, copy_error}. No
+	// per-connection identifiers leak into label values, so cardinality is
+	// constant regardless of traffic patterns.
+	TCPInboundConnections  prometheus.Counter
+	TCPInboundBytes        *prometheus.CounterVec
+	TCPInboundErrors       *prometheus.CounterVec
+	TCPOutboundConnections prometheus.Counter
+	TCPOutboundBytes       *prometheus.CounterVec
+	TCPOutboundErrors      *prometheus.CounterVec
 
 	ConfigReloads *prometheus.CounterVec
 }
@@ -97,6 +120,46 @@ func New() *Metrics {
 			},
 			[]string{"cid", "direction"},
 		),
+		TCPInboundConnections: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "tcp_inbound_connections_total",
+				Help: "TCP connections accepted on mode=tcp inbound listeners.",
+			},
+		),
+		TCPInboundBytes: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tcp_inbound_bytes_total",
+				Help: "Bytes proxied on mode=tcp inbound connections, by direction.",
+			},
+			[]string{"direction"},
+		),
+		TCPInboundErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tcp_inbound_errors_total",
+				Help: "Errors on mode=tcp inbound connections, by reason.",
+			},
+			[]string{"reason"},
+		),
+		TCPOutboundConnections: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "tcp_outbound_connections_total",
+				Help: "vsock connections accepted on mode=tcp outbound listeners.",
+			},
+		),
+		TCPOutboundBytes: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tcp_outbound_bytes_total",
+				Help: "Bytes proxied on mode=tcp outbound connections, by direction.",
+			},
+			[]string{"direction"},
+		),
+		TCPOutboundErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tcp_outbound_errors_total",
+				Help: "Errors on mode=tcp outbound connections, by reason.",
+			},
+			[]string{"reason"},
+		),
 		ConfigReloads: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "config_reloads_total",
@@ -112,6 +175,12 @@ func New() *Metrics {
 		m.InboundErrors,
 		m.OutboundConnections,
 		m.OutboundBytes,
+		m.TCPInboundConnections,
+		m.TCPInboundBytes,
+		m.TCPInboundErrors,
+		m.TCPOutboundConnections,
+		m.TCPOutboundBytes,
+		m.TCPOutboundErrors,
 		m.ConfigReloads,
 	)
 	return m

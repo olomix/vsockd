@@ -26,6 +26,14 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.OutboundConnections.WithLabelValues("16", OutboundResultAllowed).Inc()
 	m.OutboundConnections.WithLabelValues("16", OutboundResultDenied).Inc()
 	m.OutboundBytes.WithLabelValues("16", DirectionIn).Add(5)
+	m.TCPInboundConnections.Inc()
+	m.TCPInboundBytes.WithLabelValues(DirectionUp).Add(1)
+	m.TCPInboundBytes.WithLabelValues(DirectionDown).Add(2)
+	m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.TCPOutboundConnections.Inc()
+	m.TCPOutboundBytes.WithLabelValues(DirectionUp).Add(3)
+	m.TCPOutboundBytes.WithLabelValues(DirectionDown).Add(4)
+	m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
 	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
 
 	body := scrape(t, m.Handler())
@@ -36,6 +44,12 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"inbound_errors_total",
 		"outbound_connections_total",
 		"outbound_bytes_total",
+		"tcp_inbound_connections_total",
+		"tcp_inbound_bytes_total",
+		"tcp_inbound_errors_total",
+		"tcp_outbound_connections_total",
+		"tcp_outbound_bytes_total",
+		"tcp_outbound_errors_total",
 		"config_reloads_total",
 	}
 	for _, name := range want {
@@ -88,10 +102,26 @@ func TestLabelCardinalityBounded(t *testing.T) {
 	m.OutboundConnections.WithLabelValues("20", OutboundResultError).Inc()
 	m.OutboundBytes.WithLabelValues("16", DirectionIn).Inc()
 	m.OutboundBytes.WithLabelValues("16", DirectionOut).Inc()
+	// Drive the TCP passthrough counters from many notional connections.
+	// Each Inc below represents a distinct connection / direction event;
+	// after hundreds of events the series count must still be bounded by
+	// the fixed label set, not grow with traffic.
+	for i := 0; i < 500; i++ {
+		m.TCPInboundConnections.Inc()
+		m.TCPInboundBytes.WithLabelValues(DirectionUp).Inc()
+		m.TCPInboundBytes.WithLabelValues(DirectionDown).Inc()
+		m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
+		m.TCPInboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+		m.TCPOutboundConnections.Inc()
+		m.TCPOutboundBytes.WithLabelValues(DirectionUp).Inc()
+		m.TCPOutboundBytes.WithLabelValues(DirectionDown).Inc()
+		m.TCPOutboundErrors.WithLabelValues(TCPErrorDial).Inc()
+		m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+	}
 	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
 	m.ConfigReloads.WithLabelValues(ReloadResultFailure).Inc()
 
-	cases := []struct {
+	vecCases := []struct {
 		name string
 		vec  *prometheus.CounterVec
 		want int
@@ -101,11 +131,68 @@ func TestLabelCardinalityBounded(t *testing.T) {
 		{"inbound_errors_total", m.InboundErrors, 1},
 		{"outbound_connections_total", m.OutboundConnections, 3},
 		{"outbound_bytes_total", m.OutboundBytes, 2},
+		{"tcp_inbound_bytes_total", m.TCPInboundBytes, 2},
+		{"tcp_inbound_errors_total", m.TCPInboundErrors, 2},
+		{"tcp_outbound_bytes_total", m.TCPOutboundBytes, 2},
+		{"tcp_outbound_errors_total", m.TCPOutboundErrors, 2},
 		{"config_reloads_total", m.ConfigReloads, 2},
 	}
-	for _, tc := range cases {
+	for _, tc := range vecCases {
 		if got := collectorSeriesCount(t, tc.vec); got != tc.want {
 			t.Errorf("%s: series count = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	// Plain counters always report exactly one series regardless of how
+	// many times they are incremented; assert that explicitly.
+	plainCases := []struct {
+		name string
+		c    prometheus.Counter
+	}{
+		{"tcp_inbound_connections_total", m.TCPInboundConnections},
+		{"tcp_outbound_connections_total", m.TCPOutboundConnections},
+	}
+	for _, tc := range plainCases {
+		if got := collectorSeriesCount(t, tc.c); got != 1 {
+			t.Errorf("%s: series count = %d, want 1", tc.name, got)
+		}
+	}
+}
+
+// TestTCPLabelValuesFixed pins the label-value set emitted by the TCP
+// handlers. If a future change ever forwards a dynamic value (remote
+// address, hostname, etc.) into one of these labels, this test fails
+// loudly before the cardinality inflation lands in production.
+func TestTCPLabelValuesFixed(t *testing.T) {
+	m := New()
+
+	m.TCPInboundConnections.Inc()
+	m.TCPInboundBytes.WithLabelValues(DirectionUp).Inc()
+	m.TCPInboundBytes.WithLabelValues(DirectionDown).Inc()
+	m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.TCPInboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+	m.TCPOutboundConnections.Inc()
+	m.TCPOutboundBytes.WithLabelValues(DirectionUp).Inc()
+	m.TCPOutboundBytes.WithLabelValues(DirectionDown).Inc()
+	m.TCPOutboundErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+
+	body := scrape(t, m.Handler())
+
+	wantLines := []string{
+		`tcp_inbound_connections_total 1`,
+		`tcp_inbound_bytes_total{direction="up"} 1`,
+		`tcp_inbound_bytes_total{direction="down"} 1`,
+		`tcp_inbound_errors_total{reason="dial_fail"} 1`,
+		`tcp_inbound_errors_total{reason="copy_error"} 1`,
+		`tcp_outbound_connections_total 1`,
+		`tcp_outbound_bytes_total{direction="up"} 1`,
+		`tcp_outbound_bytes_total{direction="down"} 1`,
+		`tcp_outbound_errors_total{reason="dial_fail"} 1`,
+		`tcp_outbound_errors_total{reason="copy_error"} 1`,
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(body, line) {
+			t.Errorf("scrape missing line %q; got:\n%s", line, body)
 		}
 	}
 }

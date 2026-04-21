@@ -1,13 +1,19 @@
-// Package outbound implements the vsock-facing forward HTTP proxy used by
-// enclaves to reach external destinations.
+// Package outbound implements the vsock-facing proxy used by enclaves to
+// reach external destinations.
 //
-// Each configured outbound port listens on vsock. Every accepted connection
-// is authorized by peer CID before any bytes are read; unauthorized peers
-// are dropped and counted as "denied". Authorized peers get exactly one
-// HTTP request parsed — CONNECT (HTTPS tunnel) or absolute-URI GET/POST
-// (plain HTTP) — whose destination is matched against that CID's egress
-// allowlist. Allow → dial TCP, proxy the request/tunnel. Deny → 403 and
-// close.
+// Each configured outbound port listens on vsock and runs in one of two
+// modes:
+//
+//   - HTTP forward proxy (legacy, mode unset). Every accepted connection
+//     is authorized by peer CID before any bytes are read; unauthorized
+//     peers are dropped and counted as "denied". Authorized peers get
+//     exactly one HTTP request parsed — CONNECT (HTTPS tunnel) or
+//     absolute-URI GET/POST (plain HTTP) — whose destination is matched
+//     against that CID's egress allowlist. Allow → dial TCP, proxy the
+//     request/tunnel. Deny → 403 and close.
+//   - TCP passthrough (mode: tcp). Accepted vsock connections are piped
+//     bidirectionally to a fixed upstream host:port. No HTTP parsing, no
+//     per-CID allowlist.
 package outbound
 
 import (
@@ -179,6 +185,12 @@ type ApplyPlan struct {
 type applySwap struct {
 	listener *listener
 	matchers map[uint32]*allowlist.Matcher
+	// upstream is populated only when both the existing and new configs
+	// declare mode: tcp on the same port; it then carries the reload's new
+	// upstream host:port so CommitApply can atomically swap it without
+	// tearing down the accept loop. In-flight connections keep using the
+	// upstream they already dialed; new accepts pick up the replacement.
+	upstream *string
 }
 
 // PrepareApply validates the new outbound configuration, binds any newly
@@ -217,9 +229,24 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 			return nil, fmt.Errorf("outbound[%d]: %w", i, err)
 		}
 		if cur, ok := existing[cfg.Port]; ok {
-			// Port alone keys the listener; updating cur.cfg would race
-			// with the accept-loop reader. Swap only the matcher table.
-			swaps = append(swaps, applySwap{cur, newLn.matchersSnapshot()})
+			// cur.cfg.Mode is what run() dispatches on and cannot be mutated
+			// safely while the accept loop runs. Mirror the inbound guard:
+			// flipping between HTTP and tcp on the same port at runtime is
+			// not supported; operator must restart the daemon.
+			if cur.cfg.Mode != cfg.Mode {
+				cleanup()
+				return nil, fmt.Errorf(
+					"outbound[%d]: cannot change mode on port %d from %q to %q at runtime; restart required",
+					i, cfg.Port, cur.cfg.Mode, cfg.Mode)
+			}
+			// Port+mode matches; swap only the mutable state (matcher table
+			// for HTTP mode, upstream for TCP mode).
+			sw := applySwap{listener: cur, matchers: newLn.matchersSnapshot()}
+			if cfg.Mode == config.ModeTCP {
+				u := newLn.upstreamSnapshot()
+				sw.upstream = &u
+			}
+			swaps = append(swaps, sw)
 			kept[cfg.Port] = true
 			next = append(next, cur)
 			continue
@@ -254,6 +281,9 @@ func (p *ApplyPlan) CommitApply() {
 
 	for _, sw := range p.swaps {
 		sw.listener.replaceMatchers(sw.matchers)
+		if sw.upstream != nil {
+			sw.listener.replaceUpstream(*sw.upstream)
+		}
 	}
 	for _, ln := range p.newBinds {
 		s.wg.Add(1)
@@ -351,11 +381,23 @@ type listener struct {
 
 	// matchers holds the authorized-CID → compiled allowlist table. Stored
 	// as an atomic pointer so Apply can swap the whole table at reload
-	// time without disturbing in-flight connections.
+	// time without disturbing in-flight connections. Only populated for
+	// legacy HTTP-mode listeners (cfg.Mode == "").
 	matchers atomic.Pointer[map[uint32]*allowlist.Matcher]
+
+	// upstream holds the live TCP upstream address for mode=tcp listeners.
+	// Atomic so SIGHUP reloads can swap the destination without tearing
+	// down the vsock accept loop. Unused for HTTP-mode listeners.
+	upstream atomic.Pointer[string]
 }
 
 func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
+	l := &listener{cfg: cfg, server: s}
+	if cfg.Mode == config.ModeTCP {
+		u := cfg.Upstream
+		l.upstream.Store(&u)
+		return l, nil
+	}
 	if len(cfg.CIDs) == 0 {
 		return nil, fmt.Errorf("port %d: no cids configured", cfg.Port)
 	}
@@ -372,7 +414,6 @@ func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
 		}
 		matchers[oc.CID] = m
 	}
-	l := &listener{cfg: cfg, server: s}
 	l.matchers.Store(&matchers)
 	return l, nil
 }
@@ -387,6 +428,25 @@ func (l *listener) matchersSnapshot() map[uint32]*allowlist.Matcher {
 
 func (l *listener) replaceMatchers(m map[uint32]*allowlist.Matcher) {
 	l.matchers.Store(&m)
+}
+
+// upstreamSnapshot returns the currently configured upstream host:port
+// for a TCP-mode listener. Safe to call concurrently with reloads: the
+// atomic pointer guarantees readers see one self-consistent value.
+func (l *listener) upstreamSnapshot() string {
+	p := l.upstream.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// replaceUpstream atomically swaps the live TCP upstream host:port so a
+// reload changing just the upstream of an existing mode: tcp listener
+// takes effect on the next accepted connection, without tearing down the
+// accept loop.
+func (l *listener) replaceUpstream(u string) {
+	l.upstream.Store(&u)
 }
 
 func (l *listener) bind() error {
@@ -433,9 +493,29 @@ func (l *listener) run(ctx context.Context) {
 			continue
 		}
 		tempDelay = 0
+		// Capture the upstream here, inside the accept loop, rather than
+		// in the handler goroutine. This closes the goroutine-scheduling
+		// window that would otherwise let a SIGHUP reload swap the
+		// atomic upstream between Accept returning and the handler's
+		// first instruction. A reload that lands in the narrow
+		// instruction-level window between Accept and this load can
+		// still redirect this connection; closing that remaining window
+		// would require serialising reloads against a potentially
+		// indefinitely blocking Accept. See the "existing ones drain"
+		// contract in the e2e reload test; without this capture, the
+		// contract would hold only for connections that have reached
+		// the DialContext line.
+		var tcpUpstream string
+		if l.cfg.Mode == config.ModeTCP {
+			tcpUpstream = l.upstreamSnapshot()
+		}
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
+			if l.cfg.Mode == config.ModeTCP {
+				l.handleTCP(ctx, c, tcpUpstream)
+				return
+			}
 			l.handle(ctx, c)
 		}()
 	}

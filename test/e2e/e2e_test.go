@@ -6,7 +6,9 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -423,4 +426,486 @@ shutdown_grace: 2s
 			t.Errorf("body = %q, want new-route-ok", body)
 		}
 	})
+}
+
+// logRecord mirrors the unexported helper in the per-package tests: a
+// decoded JSON record captured through a slog JSON handler so e2e
+// assertions can key off stable attribute shapes instead of slog's
+// internal Value types.
+type logRecord map[string]any
+
+// captureHandler funnels every slog record through an internal JSON
+// handler and appends it to a shared buffer, so e2e assertions can scan
+// the full log tape produced by app.New's logger.
+type captureHandler struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	json slog.Handler
+}
+
+func newCaptureHandler() *captureHandler {
+	h := &captureHandler{}
+	h.json = slog.NewJSONHandler(&h.buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	return h
+}
+
+func (h *captureHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.json.Enabled(ctx, l)
+}
+
+func (h *captureHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.json.Handle(ctx, r)
+}
+
+func (h *captureHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	return &captureHandler{json: h.json.WithAttrs(as)}
+}
+
+func (h *captureHandler) WithGroup(n string) slog.Handler {
+	return &captureHandler{json: h.json.WithGroup(n)}
+}
+
+func (h *captureHandler) records(t *testing.T) []logRecord {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []logRecord
+	dec := json.NewDecoder(bytes.NewReader(h.buf.Bytes()))
+	for {
+		var r logRecord
+		if err := dec.Decode(&r); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode log: %v", err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func countMessage(recs []logRecord, target string) int {
+	n := 0
+	for _, r := range recs {
+		if m, _ := r["msg"].(string); m == target {
+			n++
+		}
+	}
+	return n
+}
+
+func findMessage(recs []logRecord, target string) logRecord {
+	for _, r := range recs {
+		if m, _ := r["msg"].(string); m == target {
+			return r
+		}
+	}
+	return nil
+}
+
+// startPrefixEcho runs a newline-framed TCP echo on 127.0.0.1. Each read
+// line is echoed back prefixed with prefix+":" and terminated with "\n".
+// The prefix lets a reload sub-case tell which upstream (pre or post
+// reload) ultimately answered a given connection.
+func startPrefixEcho(t *testing.T, prefix string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("prefix echo listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					_, err := c.Write([]byte(
+						prefix + ":" + sc.Text() + "\n"))
+					if err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// fakeVsockEcho registers a loopback vsock listener at (cid, port) whose
+// accepted connections byte-echo everything they read. Stands in for an
+// enclave TCP service sitting at the far end of the vsock link in the
+// inbound mode: tcp path.
+func fakeVsockEcho(
+	t *testing.T,
+	reg *vsockconn.Registry,
+	cid, port uint32,
+) {
+	t.Helper()
+	ln, err := vsockconn.ListenLoopback(reg, cid, port)
+	if err != nil {
+		t.Fatalf("fake vsock echo listen (cid=%d port=%d): %v",
+			cid, port, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+}
+
+// waitForCount polls capH until countMessage for each named message hits
+// its expected value or the deadline expires. Returns the snapshot
+// records so the caller can assert on attributes without re-reading.
+func waitForCount(
+	t *testing.T,
+	capH *captureHandler,
+	expect map[string]int,
+	timeout time.Duration,
+) []logRecord {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var recs []logRecord
+	for {
+		recs = capH.records(t)
+		done := true
+		for msg, want := range expect {
+			if countMessage(recs, msg) < want {
+				done = false
+				break
+			}
+		}
+		if done {
+			return recs
+		}
+		if time.Now().After(deadline) {
+			for msg, want := range expect {
+				got := countMessage(recs, msg)
+				if got < want {
+					t.Errorf(
+						"log %q count = %d, want >= %d", msg, got, want)
+				}
+			}
+			return recs
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestEndToEnd_TCPPassthrough drives both mode=tcp directions through
+// app.New/app.Start end-to-end:
+//
+//   - inbound TCP listener on 127.0.0.1 forwarding to a loopback-vsock
+//     echo (the fake enclave)
+//   - outbound vsock listener forwarding to a real 127.0.0.1 TCP echo
+//
+// It then reloads the config with a new outbound upstream and verifies
+// new vsock connections land on the new echo while an already-dialed
+// connection keeps draining through the pre-reload upstream. The shared
+// debug logger is captured so the per-connection open/close pairs and
+// their total_bytes attrs can be asserted.
+func TestEndToEnd_TCPPassthrough(t *testing.T) {
+	const (
+		inVsockPort  uint32 = 8090
+		outVsockPort uint32 = 9100
+	)
+	inTCPPort := allocPort(t)
+
+	echoA := startPrefixEcho(t, "A")
+
+	reg := vsockconn.NewRegistry()
+	inboundDialer := vsockconn.NewLoopbackDialer(reg, hostCID)
+	outboundListen := outbound.ListenFunc(
+		func(port uint32) (vsockconn.Listener, error) {
+			return vsockconn.ListenLoopback(reg, 0, port)
+		})
+
+	fakeVsockEcho(t, reg, enclaveCID, inVsockPort)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "vsockd.yaml")
+	initial := fmt.Sprintf(`
+log_level: debug
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: tcp
+    target_cid: %d
+    target_port: %d
+outbound:
+  - port: %d
+    mode: tcp
+    upstream: "%s"
+shutdown_grace: 2s
+`, inTCPPort, enclaveCID, inVsockPort, outVsockPort, echoA)
+	writeConfig(t, cfgPath, initial)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	capH := newCaptureHandler()
+	logger := slog.New(capH)
+
+	a, err := app.New(app.Options{
+		ConfigPath:    cfgPath,
+		Config:        cfg,
+		Logger:        logger,
+		VsockDialer:   inboundDialer,
+		VsockListenFn: outboundListen,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 3*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+	})
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("app.Start: %v", err)
+	}
+
+	// Counts of connections opened per direction — the final assertion
+	// block uses these to verify one open/close log pair exists per
+	// accepted connection.
+	var (
+		inboundConns  int
+		outboundConns int
+	)
+
+	t.Run("inbound_tcp_passthrough", func(t *testing.T) {
+		addr := fmt.Sprintf("127.0.0.1:%d", inTCPPort)
+		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial inbound tcp: %v", err)
+		}
+		defer c.Close()
+
+		payload := []byte("hello-inbound-tcp")
+		if _, err := c.Write(payload); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		// Half-close the write side so the vsock echo's io.Copy returns
+		// EOF and the inbound shuttle unblocks its reverse direction.
+		if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite: %v", err)
+		}
+
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got, err := io.ReadAll(c)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("echo = %q, want %q", got, payload)
+		}
+		inboundConns++
+	})
+
+	t.Run("outbound_tcp_passthrough_pre_reload", func(t *testing.T) {
+		enclaveDialer := vsockconn.NewLoopbackDialer(reg, enclaveCID)
+		c, err := enclaveDialer.Dial(0, outVsockPort)
+		if err != nil {
+			t.Fatalf("enclave dial outbound: %v", err)
+		}
+		defer c.Close()
+
+		// Line-framed round-trip: write "alpha\n", expect "A:alpha\n".
+		if _, err := c.Write([]byte("alpha\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		br := bufio.NewReader(c)
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if line != "A:alpha\n" {
+			t.Fatalf("pre-reload echo = %q, want %q", line, "A:alpha\n")
+		}
+		// Closing triggers the close log we'll assert on later.
+		_ = c.Close()
+		outboundConns++
+	})
+
+	t.Run("reload_changes_tcp_upstream", func(t *testing.T) {
+		echoB := startPrefixEcho(t, "B")
+		updated := fmt.Sprintf(`
+log_level: debug
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: tcp
+    target_cid: %d
+    target_port: %d
+outbound:
+  - port: %d
+    mode: tcp
+    upstream: "%s"
+shutdown_grace: 2s
+`, inTCPPort, enclaveCID, inVsockPort, outVsockPort, echoB)
+		writeConfig(t, cfgPath, updated)
+
+		// Open an outbound connection BEFORE the reload so its upstream
+		// dial resolves to echoA, then verify it keeps draining through
+		// echoA after the reload fires. This is the "existing ones
+		// drain" assertion from the plan.
+		enclaveDialer := vsockconn.NewLoopbackDialer(reg, enclaveCID)
+		existing, err := enclaveDialer.Dial(0, outVsockPort)
+		if err != nil {
+			t.Fatalf("pre-reload dial: %v", err)
+		}
+		defer existing.Close()
+		if _, err := existing.Write([]byte("drain1\n")); err != nil {
+			t.Fatalf("drain1 write: %v", err)
+		}
+		_ = existing.SetReadDeadline(time.Now().Add(2 * time.Second))
+		existBR := bufio.NewReader(existing)
+		line, err := existBR.ReadString('\n')
+		if err != nil {
+			t.Fatalf("drain1 read: %v", err)
+		}
+		if line != "A:drain1\n" {
+			t.Fatalf(
+				"pre-reload existing echo = %q, want %q",
+				line, "A:drain1\n")
+		}
+
+		if err := a.Reload(); err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+
+		// Existing conn: another round-trip must still go through echoA
+		// because its upstream TCP dial happened before the swap.
+		if _, err := existing.Write([]byte("drain2\n")); err != nil {
+			t.Fatalf("drain2 write: %v", err)
+		}
+		_ = existing.SetReadDeadline(time.Now().Add(2 * time.Second))
+		line, err = existBR.ReadString('\n')
+		if err != nil {
+			t.Fatalf("drain2 read: %v", err)
+		}
+		if line != "A:drain2\n" {
+			t.Fatalf(
+				"post-reload existing echo = %q, want %q (should drain through old upstream)",
+				line, "A:drain2\n")
+		}
+		_ = existing.Close()
+		outboundConns++
+
+		// New conn: must resolve to echoB because upstreamSnapshot at
+		// the new accept reads the swapped atomic.
+		fresh, err := enclaveDialer.Dial(0, outVsockPort)
+		if err != nil {
+			t.Fatalf("post-reload dial: %v", err)
+		}
+		defer fresh.Close()
+		if _, err := fresh.Write([]byte("switched\n")); err != nil {
+			t.Fatalf("switched write: %v", err)
+		}
+		_ = fresh.SetReadDeadline(time.Now().Add(2 * time.Second))
+		freshBR := bufio.NewReader(fresh)
+		line, err = freshBR.ReadString('\n')
+		if err != nil {
+			t.Fatalf("switched read: %v", err)
+		}
+		if line != "B:switched\n" {
+			t.Fatalf(
+				"post-reload new echo = %q, want %q (upstream not swapped)",
+				line, "B:switched\n")
+		}
+		_ = fresh.Close()
+		outboundConns++
+	})
+
+	// Poll until every opened connection has produced its expected
+	// open/close log pair, then assert exact counts. Close logs are
+	// emitted asynchronously from the handler goroutine so a short
+	// settle window is needed.
+	recs := waitForCount(t, capH, map[string]int{
+		"inbound tcp connection":    inboundConns,
+		"tcp connection closed":     inboundConns,
+		"inbound vsock connection":  outboundConns,
+		"vsock connection closed":   outboundConns,
+	}, 3*time.Second)
+
+	if got := countMessage(recs, "inbound tcp connection"); got != inboundConns {
+		t.Errorf("inbound tcp connection count = %d, want %d",
+			got, inboundConns)
+	}
+	if got := countMessage(recs, "tcp connection closed"); got != inboundConns {
+		t.Errorf("tcp connection closed count = %d, want %d",
+			got, inboundConns)
+	}
+	if got := countMessage(recs, "inbound vsock connection"); got != outboundConns {
+		t.Errorf("inbound vsock connection count = %d, want %d",
+			got, outboundConns)
+	}
+	if got := countMessage(recs, "vsock connection closed"); got != outboundConns {
+		t.Errorf("vsock connection closed count = %d, want %d",
+			got, outboundConns)
+	}
+
+	// Byte totals sanity: every close log carries total_bytes >= 0, and
+	// at least one of each direction recorded a positive total (the
+	// round-trip actually transferred bytes).
+	assertPositiveTotal := func(msg string) {
+		t.Helper()
+		var anyPositive bool
+		for _, r := range recs {
+			if m, _ := r["msg"].(string); m != msg {
+				continue
+			}
+			v, ok := r["total_bytes"].(float64)
+			if !ok {
+				t.Errorf("%q missing total_bytes: %v", msg, r)
+				continue
+			}
+			if v < 0 {
+				t.Errorf("%q total_bytes negative: %v", msg, v)
+			}
+			if v > 0 {
+				anyPositive = true
+			}
+		}
+		if !anyPositive {
+			t.Errorf("no %q record had total_bytes > 0", msg)
+		}
+	}
+	assertPositiveTotal("tcp connection closed")
+	assertPositiveTotal("vsock connection closed")
+
+	// Spot-check a representative close log for the vsock side carries
+	// a plausible CID (enclaveCID from the dialer).
+	if rec := findMessage(recs, "vsock connection closed"); rec != nil {
+		if got := rec["cid"]; got != float64(enclaveCID) {
+			t.Errorf("vsock close cid = %v, want %v", got, enclaveCID)
+		}
+		if got := rec["listen_port"]; got != float64(outVsockPort) {
+			t.Errorf("vsock close listen_port = %v, want %v",
+				got, outVsockPort)
+		}
+	}
 }

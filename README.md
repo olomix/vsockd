@@ -18,6 +18,11 @@ a per-CID outbound egress allowlist.
   HTTPS, absolute-URI `GET`/`POST` for HTTP), so an app inside the enclave
   can simply set `HTTP_PROXY` and `HTTPS_PROXY`. Each request is checked
   against a per-(port, CID) allowlist before any upstream dial.
+- **Raw TCP passthrough (`mode: tcp`).** Both directions also support a
+  `mode: tcp` listener variant that forwards bytes without any
+  application-layer parsing — no HTTP Host, no TLS SNI, no allowlist. Use
+  it for databases, gRPC, or any non-HTTP protocol that needs to cross
+  the enclave boundary.
 
 Multiple enclaves may share the same inbound host port under distinct
 hostnames. The same CID may NOT appear under more than one outbound port —
@@ -35,12 +40,22 @@ this is enforced at config-load time.
                                     │   └─ dial vsock                │
                                     │   └─ replay ClientHello + copy │
                                     │                                │
+  external client ── TCP ────────▶  │  inbound mode: tcp             │
+  (any protocol)                    │   └─ no sniff, no routing      │ ── vsock(target_cid,   ─▶ enclave
+                                    │   └─ dial fixed vsock target   │      target_port)
+                                    │   └─ raw byte pipe             │
+                                    │                                │
   external service ◀── TCP ──────── │  outbound listener             │
   (e.g. api.stripe.com:443)         │   └─ accept vsock, read peer CID
                                     │   └─ CID in port's CID set?    │ ◀── vsock(port) ─────── enclave
                                     │   └─ read HTTP request         │     (CONNECT/GET/POST)
                                     │   └─ allowlist(host:port)?     │
                                     │   └─ dial + stream             │
+                                    │                                │
+  external service ◀── TCP ──────── │  outbound mode: tcp            │
+  (any protocol, fixed upstream)    │   └─ no HTTP parse, no allowlist
+                                    │   └─ dial fixed upstream       │ ◀── vsock(port) ─────── enclave
+                                    │   └─ raw byte pipe             │      (raw bytes)
                                     │                                │
                                     │  /metrics (Prometheus)         │
                                     └────────────────────────────────┘
@@ -167,7 +182,85 @@ Command-line flags:
   explicit flag overrides `metrics.bind` from the YAML.
 - `-log-format FORMAT` — `json`, `text`, or `auto`. Overrides the YAML.
   `auto` picks `text` when stderr is a TTY and `json` otherwise.
+- `-debug` — force the log level to `debug`. Equivalent to setting
+  `VSOCKD_LOG_LEVEL=debug` or `log_level: debug` in the YAML, but takes
+  precedence over both.
 - `-version` — print the version and exit.
+
+## TCP passthrough mode
+
+Both inbound and outbound listeners accept a `mode: tcp` variant that
+forwards raw bytes in both directions without touching the application
+layer. No HTTP Host header, no TLS SNI, no allowlist. Use it for non-HTTP
+protocols — Postgres, MySQL, gRPC, Redis, SSH, anything.
+
+```yaml
+inbound:
+  # TCP → vsock: accept TCP on bind:port and shuttle bytes to a fixed
+  # enclave (cid, vsock_port).
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 16
+    target_port: 5432
+
+outbound:
+  # vsock → TCP: accept vsock on this port and shuttle bytes to a fixed
+  # upstream host:port. No per-CID allowlist; any enclave that can
+  # connect reaches the upstream.
+  - port: 9000
+    mode: tcp
+    upstream: 10.0.0.5:5432
+```
+
+TCP listeners participate in the same SIGHUP reload and the same
+`shutdown_grace` drain as the HTTP listeners. Outbound `upstream` is
+swapped atomically (new connections use the new upstream, existing ones
+drain on the old one); inbound `target_cid` / `target_port` cannot change
+at runtime — a reload that tries to edit them on an already-bound port is
+rejected with a "restart required" error, and the running listener keeps
+forwarding to the original target.
+
+### Debug logging
+
+Setting the log level to `debug` emits one structured log event per TCP
+connection on open and close. Byte totals are reported on close. The
+shapes below show the message and the structured attrs; the actual
+wire format depends on `-log-format` (JSON by default, text for a TTY).
+
+Vsock-side (outbound `mode: tcp`), attrs: `cid`, `port`, `listen_port`,
+`total_bytes` (on close only):
+
+```
+level=DEBUG msg="inbound vsock connection" cid=3 port=1234 listen_port=9000
+level=DEBUG msg="vsock connection closed"  cid=3 port=1234 listen_port=9000 total_bytes=12345
+```
+
+TCP-side (inbound `mode: tcp`), attrs: `remote`, `listen`, `total_bytes`
+(on close only):
+
+```
+level=DEBUG msg="inbound tcp connection" remote=192.168.1.10:54321 listen=0.0.0.0:5432
+level=DEBUG msg="tcp connection closed"  remote=192.168.1.10:54321 listen=0.0.0.0:5432 total_bytes=12345
+```
+
+Upstream dial failures are logged at `WARN` independent of the debug
+setting, so alerts keyed on level pick them up. Outbound attrs:
+`cid`, `port`, `listen_port`, `upstream`, `err`. Inbound attrs:
+`remote`, `listen`, `target_cid`, `target_port`, `err`. Dials
+cancelled by `Shutdown` during graceful teardown do not emit the warn
+line or increment `tcp_*_errors_total{reason=dial_fail}` — they are
+expected shutdown artefacts rather than upstream faults.
+
+Three ways to toggle debug, in order of precedence:
+
+1. `-debug` CLI flag.
+2. `VSOCKD_LOG_LEVEL=debug` environment variable.
+3. `log_level: debug` in the YAML config.
+
+Any other value than `debug` or `info` for the env var or YAML is a
+fatal config error at startup. Omitting the setting keeps the `info`
+default.
 
 ## Enclave-side socat recipe
 
@@ -226,6 +319,12 @@ registry — there is no global Prometheus state.
 | `inbound_errors_total` | `route`, `kind` | Inbound errors by kind: `sniff`, `route`, `dial`, `copy`, `accept`. |
 | `outbound_connections_total` | `cid`, `result` | vsock accepts on outbound listeners; `result` is `allowed`, `denied`, or `error`. |
 | `outbound_bytes_total` | `cid`, `direction` | Bytes proxied outbound, by CID and direction. |
+| `tcp_inbound_connections_total` | — | TCP connections accepted on `mode: tcp` inbound listeners. |
+| `tcp_inbound_bytes_total` | `direction` | Bytes proxied by TCP inbound listeners; `direction` is `up` or `down`. |
+| `tcp_inbound_errors_total` | `reason` | TCP inbound errors; `reason` is `dial_fail` or `copy_error`. |
+| `tcp_outbound_connections_total` | — | vsock connections accepted on `mode: tcp` outbound listeners. |
+| `tcp_outbound_bytes_total` | `direction` | Bytes proxied by TCP outbound listeners; `direction` is `up` or `down`. |
+| `tcp_outbound_errors_total` | `reason` | TCP outbound errors; `reason` is `dial_fail` or `copy_error`. |
 | `config_reloads_total` | `result` | SIGHUP reload attempts; `result` is `success` or `failure`. |
 
 Label cardinality is bounded by the config. `route` is the hostname from the
@@ -241,10 +340,15 @@ are ever used as label values.
   against the running set. Listeners whose `(bind, port)` disappeared are
   closed (existing connections continue until they end naturally). New
   listeners are started. Listeners whose bind:port is unchanged swap their
-  route/CID tables atomically — new connections see the new rules, in-flight
-  connections keep the rules they started with. A failed reload is logged,
-  `config_reloads_total{result="failure"}` increments, and the running
-  config is left untouched.
+  route/CID tables atomically, and an outbound `mode: tcp` listener kept at
+  the same port atomically picks up a new `upstream` — new connections see
+  the new rules or upstream, in-flight connections keep the values they
+  started with. Changing the `mode` on an already-bound bind:port (inbound)
+  or vsock port (outbound) is rejected with a "restart required" error, and
+  changing `target_cid` / `target_port` on an existing inbound `mode: tcp`
+  listener is rejected the same way.
+  A failed reload is logged, `config_reloads_total{result="failure"}`
+  increments, and the running config is left untouched.
 - **Graceful shutdown.** On `SIGTERM` / `SIGINT` vsockd stops accepting new
   connections, waits up to `shutdown_grace` (default 30s) for active
   connections to drain, then force-closes the rest. A second signal is not
@@ -252,6 +356,9 @@ are ever used as label values.
 - **Logging.** All logs are structured via `log/slog`. `-log-format json`
   (the default in production) is a one-line-per-event JSON stream; use
   `text` locally. No plaintext bytes from TLS passthrough are logged.
+  The log level defaults to `info`; set `log_level: debug` in the YAML,
+  `VSOCKD_LOG_LEVEL=debug`, or pass `-debug` to get per-connection
+  open/close events from TCP passthrough listeners.
 - **Peer CID trust.** The outbound listener trusts the peer CID reported by
   the kernel — it is set by the Nitro hypervisor and cannot be spoofed by
   the enclave. This is the only authentication for outbound requests in v1.

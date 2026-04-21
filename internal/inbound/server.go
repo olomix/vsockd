@@ -219,6 +219,22 @@ func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error)
 		}
 		k := newLn.key()
 		if cur, ok := existing[k]; ok {
+			// For mode=tcp listeners there is no in-place swap of the vsock
+			// target today: handleTCP reads cur.targetCID/targetPort, which
+			// CommitApply never updates. Silently ignoring a target_cid /
+			// target_port edit would leave operators believing the reload
+			// took effect while traffic keeps flowing to the old enclave,
+			// so reject the reload loudly instead — mirroring the
+			// mode-change guard a few lines below.
+			if newLn.cfg.Mode == config.ModeTCP {
+				if cur.targetCID.Load() != newLn.cfg.TargetCID ||
+					cur.targetPort.Load() != newLn.cfg.TargetPort {
+					cleanup()
+					return nil, fmt.Errorf(
+						"inbound[%d]: cannot change target_cid/target_port on %s at runtime; restart required",
+						i, newLn.addr())
+				}
+			}
 			// Key covers Bind, Port, and Mode — the only cfg fields the
 			// handle path reads — so we only need to swap the routes map.
 			// Leaving cur.cfg alone avoids a data race with accept-loop
@@ -371,17 +387,33 @@ type listener struct {
 	// routes holds the lowercase-hostname → Route map. Stored as an atomic
 	// pointer so Apply can swap the whole table without blocking the hot
 	// path, and in-flight connections keep a stable reference to the map
-	// they observed at accept time.
+	// they observed at accept time. Unused for mode=tcp listeners.
 	routes atomic.Pointer[map[string]config.Route]
+
+	// targetCID / targetPort hold the live vsock target for mode=tcp
+	// listeners. Atomic types keep concurrent handleTCP reads race-free
+	// and leave room to introduce an in-place target swap the same way
+	// the outbound side swaps upstream — today a SIGHUP that changes
+	// target_cid or target_port on an already-bound inbound listener is
+	// rejected with a "restart required" error by PrepareApply, so these
+	// values never change for the lifetime of the listener.
+	// Unused for http-host/tls-sni listeners.
+	targetCID  atomic.Uint32
+	targetPort atomic.Uint32
 }
 
 func newListener(cfg config.InboundListener, s *Server) (*listener, error) {
 	switch cfg.Mode {
-	case config.ModeHTTPHost, config.ModeTLSSNI:
+	case config.ModeHTTPHost, config.ModeTLSSNI, config.ModeTCP:
 	default:
 		return nil, fmt.Errorf("unknown mode %q", cfg.Mode)
 	}
 	l := &listener{cfg: cfg, server: s}
+	if cfg.Mode == config.ModeTCP {
+		l.targetCID.Store(cfg.TargetCID)
+		l.targetPort.Store(cfg.TargetPort)
+		return l, nil
+	}
 	rm := buildRouteMap(cfg.Routes)
 	l.routes.Store(&rm)
 	return l, nil
@@ -467,6 +499,10 @@ func (l *listener) run(ctx context.Context) {
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
+			if l.cfg.Mode == config.ModeTCP {
+				l.handleTCP(ctx, c)
+				return
+			}
 			l.handle(ctx, c)
 		}()
 	}

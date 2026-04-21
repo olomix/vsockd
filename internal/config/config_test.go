@@ -368,6 +368,151 @@ metrics:
 `,
 			want: "metrics.bind",
 		},
+		{
+			name: "inbound tcp missing target_cid",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_port: 8080
+`,
+			want: "target_cid",
+		},
+		{
+			name: "inbound tcp missing target_port",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 3
+`,
+			want: "target_port",
+		},
+		{
+			name: "inbound tcp with routes",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 3
+    target_port: 8080
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+`,
+			want: "routes not allowed with mode: tcp",
+		},
+		{
+			name: "inbound http-host with target_cid",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    target_cid: 3
+    target_port: 8080
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+`,
+			want: "target_cid/target_port only valid with mode: tcp",
+		},
+		{
+			name: "outbound tcp missing upstream",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+`,
+			want: "upstream required",
+		},
+		{
+			name: "outbound tcp invalid upstream (no port)",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+    upstream: "10.0.0.5"
+`,
+			want: "not host:port",
+		},
+		{
+			name: "outbound tcp invalid upstream port",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+    upstream: "10.0.0.5:99999"
+`,
+			want: "invalid port",
+		},
+		{
+			name: "outbound tcp empty host in upstream",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+    upstream: ":5432"
+`,
+			want: "host must not be empty",
+		},
+		{
+			name: "outbound tcp wildcard in upstream",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+    upstream: "*.example.com:5432"
+`,
+			want: "wildcards not allowed",
+		},
+		{
+			name: "outbound tcp with cids",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: tcp
+    upstream: "10.0.0.5:5432"
+    cids:
+      - {cid: 3, allowed_hosts: ["*"]}
+`,
+			want: "cids not allowed with mode: tcp",
+		},
+		{
+			name: "outbound legacy with upstream",
+			yaml: `
+outbound:
+  - port: 8080
+    upstream: "10.0.0.5:5432"
+    cids:
+      - {cid: 3, allowed_hosts: ["*"]}
+`,
+			want: "upstream only valid with mode: tcp",
+		},
+		{
+			name: "outbound unknown mode",
+			yaml: `
+outbound:
+  - port: 8080
+    mode: bogus
+    upstream: "10.0.0.5:5432"
+`,
+			want: `mode "bogus"`,
+		},
+		{
+			name: "invalid log_level",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+log_level: trace
+`,
+			want: `log_level "trace"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -380,6 +525,78 @@ metrics:
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// TestLoadTCPMode exercises the mode: tcp variants for both inbound and
+// outbound listeners along with the new log_level field.
+func TestLoadTCPMode(t *testing.T) {
+	yamlDoc := `
+log_level: debug
+
+inbound:
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 3
+    target_port: 8080
+
+outbound:
+  - port: 9000
+    mode: tcp
+    upstream: "10.0.0.5:5432"
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogLevel != config.LogLevelDebug {
+		t.Fatalf("log_level = %q, want %q",
+			cfg.LogLevel, config.LogLevelDebug)
+	}
+	if len(cfg.Inbound) != 1 || cfg.Inbound[0].Mode != config.ModeTCP {
+		t.Fatalf("inbound[0].Mode = %q, want %q",
+			cfg.Inbound[0].Mode, config.ModeTCP)
+	}
+	if cfg.Inbound[0].TargetCID != 3 {
+		t.Fatalf("inbound[0].TargetCID = %d, want 3",
+			cfg.Inbound[0].TargetCID)
+	}
+	if cfg.Inbound[0].TargetPort != 8080 {
+		t.Fatalf("inbound[0].TargetPort = %d, want 8080",
+			cfg.Inbound[0].TargetPort)
+	}
+	if len(cfg.Outbound) != 1 || cfg.Outbound[0].Mode != config.ModeTCP {
+		t.Fatalf("outbound[0].Mode = %q, want %q",
+			cfg.Outbound[0].Mode, config.ModeTCP)
+	}
+	if cfg.Outbound[0].Upstream != "10.0.0.5:5432" {
+		t.Fatalf("outbound[0].Upstream = %q", cfg.Outbound[0].Upstream)
+	}
+	if len(cfg.Outbound[0].CIDs) != 0 {
+		t.Fatalf("outbound[0].CIDs should be empty, got %d",
+			len(cfg.Outbound[0].CIDs))
+	}
+}
+
+// TestLoadLogLevelInfo verifies the explicit "info" value round-trips.
+func TestLoadLogLevelInfo(t *testing.T) {
+	yamlDoc := `
+log_level: info
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogLevel != config.LogLevelInfo {
+		t.Fatalf("log_level = %q, want %q",
+			cfg.LogLevel, config.LogLevelInfo)
 	}
 }
 

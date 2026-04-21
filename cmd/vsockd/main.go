@@ -35,6 +35,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		"listen address for the Prometheus /metrics endpoint")
 	logFormat := fs.String("log-format", "",
 		"log format: json | text | auto (empty uses config.log_format)")
+	debug := fs.Bool("debug", false,
+		"enable debug logging (overrides VSOCKD_LOG_LEVEL and config.log_level)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -62,11 +64,20 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	logger := buildLogger(stderr, resolveLogFormat(*logFormat, cfg.LogFormat))
+	level, err := resolveLogLevel(*debug,
+		os.Getenv("VSOCKD_LOG_LEVEL"), cfg.LogLevel)
+	if err != nil {
+		fmt.Fprintf(stderr, "vsockd: %v\n", err)
+		return 1
+	}
+
+	logger := buildLogger(stderr,
+		resolveLogFormat(*logFormat, cfg.LogFormat), level)
 
 	dialer, listenFn, backend := selectVsockBackend()
 	logger.Info("vsockd starting",
-		"version", version, "config", *configPath, "vsock_backend", backend)
+		"version", version, "config", *configPath,
+		"vsock_backend", backend, "log_level", level.String())
 
 	a, err := app.New(app.Options{
 		ConfigPath:    *configPath,
@@ -144,8 +155,12 @@ func isTerminal(f *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func buildLogger(w io.Writer, format string) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+func buildLogger(w io.Writer, format string, level slog.Level) *slog.Logger {
+	// slog.LevelVar keeps all handlers behind one mutable level. We set it
+	// once at startup; future dynamic flipping can reuse the same var.
+	var lvl slog.LevelVar
+	lvl.Set(level)
+	opts := &slog.HandlerOptions{Level: &lvl}
 	var h slog.Handler
 	switch format {
 	case config.LogFormatText:
@@ -154,6 +169,32 @@ func buildLogger(w io.Writer, format string) *slog.Logger {
 		h = slog.NewJSONHandler(w, opts)
 	}
 	return slog.New(h)
+}
+
+// resolveLogLevel picks the effective slog level given the -debug flag, the
+// VSOCKD_LOG_LEVEL env var, and the yaml log_level value. Precedence:
+// flag > env > yaml > info. An invalid env var value is a fatal error
+// (yaml values are validated at config-load time).
+func resolveLogLevel(debug bool, envVar, cfgLevel string) (slog.Level, error) {
+	if debug {
+		return slog.LevelDebug, nil
+	}
+	if envVar != "" {
+		switch envVar {
+		case config.LogLevelDebug:
+			return slog.LevelDebug, nil
+		case config.LogLevelInfo:
+			return slog.LevelInfo, nil
+		default:
+			return slog.LevelInfo, fmt.Errorf(
+				"VSOCKD_LOG_LEVEL %q must be %q or %q",
+				envVar, config.LogLevelDebug, config.LogLevelInfo)
+		}
+	}
+	if cfgLevel == config.LogLevelDebug {
+		return slog.LevelDebug, nil
+	}
+	return slog.LevelInfo, nil
 }
 
 // resolveMetricsAddr lets the YAML config override the compiled-in flag
