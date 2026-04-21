@@ -1,0 +1,21 @@
+# Go build artefacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage
+coverage.txt
+coverage.out
+
+# Build outputs
+/vsockd
+/dist/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

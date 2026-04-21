@@ -96,58 +96,58 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 1: Project skeleton and tooling
 
-- [ ] `go mod init github.com/olomix/vsockd` with Go 1.26 directive
-- [ ] create directories: `cmd/vsockd/`, `internal/config/`,
+- [x] `go mod init github.com/olomix/vsockd` with Go 1.26 directive
+- [x] create directories: `cmd/vsockd/`, `internal/config/`,
       `internal/allowlist/`, `internal/inbound/`, `internal/outbound/`,
       `internal/vsockconn/`, `internal/metrics/`, `examples/`
-- [ ] add `cmd/vsockd/main.go` stub that parses `-config` flag, prints
+- [x] add `cmd/vsockd/main.go` stub that parses `-config` flag, prints
       version, exits 0 — just enough to compile
-- [ ] add `Makefile` with `build`, `test`, `vet`, `lint`, `docker` targets
-- [ ] add `.gitignore` (Go defaults + `/vsockd` binary + `/dist/`)
-- [ ] add `examples/vsockd.yaml` placeholder (filled in Task 2)
-- [ ] write a smoke test in `cmd/vsockd/main_test.go` that runs the binary
+- [x] add `Makefile` with `build`, `test`, `vet`, `lint`, `docker` targets
+- [x] add `.gitignore` (Go defaults + `/vsockd` binary + `/dist/`)
+- [x] add `examples/vsockd.yaml` placeholder (filled in Task 2)
+- [x] write a smoke test in `cmd/vsockd/main_test.go` that runs the binary
       with `-help` and asserts exit code 0
-- [ ] run `go build ./...` and `go test ./...` — both must pass
+- [x] run `go build ./...` and `go test ./...` — both must pass
 
 ### Task 2: Config package
 
-- [ ] define types in `internal/config/config.go`:
+- [x] define types in `internal/config/config.go`:
   - `Config` (top-level)
   - `InboundListener` { Bind, Port, Mode (`http-host`|`tls-sni`), Routes }
   - `Route` { Hostname, CID, VsockPort }
   - `OutboundListener` { Port, CIDs []OutboundCID }
   - `OutboundCID` { CID, AllowedHosts []string }
-- [ ] implement `Load(path string) (*Config, error)` using
+- [x] implement `Load(path string) (*Config, error)` using
       `gopkg.in/yaml.v3` with `KnownFields(true)` (strict)
-- [ ] implement `Validate()`:
+- [x] implement `Validate()`:
   - inbound mode must be one of the two known values
   - every inbound route hostname non-empty, CID ≥ 3, vsock port in range
   - **same CID must not appear under more than one outbound port** (reject)
   - allowlist patterns must be well-formed `host:port` or `*`
   - reject duplicate hostnames within a single inbound listener
-- [ ] write `examples/vsockd.yaml` covering: two inbound listeners (HTTP +
+- [x] write `examples/vsockd.yaml` covering: two inbound listeners (HTTP +
       TLS), multi-CID outbound port, per-CID allowlist, wildcard entry
-- [ ] write tests: table-driven load+validate cases (valid config,
+- [x] write tests: table-driven load+validate cases (valid config,
       duplicate CID across ports, duplicate hostname, unknown mode,
       malformed allowlist, unknown YAML field)
-- [ ] run `go test ./internal/config/...` — must pass before next task
+- [x] run `go test ./internal/config/...` — must pass before next task
 
 ### Task 3: Allowlist matcher
 
-- [ ] in `internal/allowlist/allowlist.go` define `Matcher` built from
+- [x] in `internal/allowlist/allowlist.go` define `Matcher` built from
       a list of patterns; supports exact `host:port`, suffix wildcard
       `*.example.com:443`, and universal `*`
-- [ ] implement `New(patterns []string) (*Matcher, error)` — parse once,
+- [x] implement `New(patterns []string) (*Matcher, error)` — parse once,
       validate patterns
-- [ ] implement `Allow(host string, port int) bool`
-- [ ] write tests: exact match, suffix match (including nested subdomains),
+- [x] implement `Allow(host string, port int) bool`
+- [x] write tests: exact match, suffix match (including nested subdomains),
       port mismatch, host casing normalisation, `*` wildcard, rejection
       path, malformed pattern
-- [ ] run `go test ./internal/allowlist/...` — must pass before next task
+- [x] run `go test ./internal/allowlist/...` — must pass before next task
 
 ### Task 4: Metrics package
 
-- [ ] in `internal/metrics/metrics.go` define a struct holding the
+- [x] in `internal/metrics/metrics.go` define a struct holding the
       Prometheus collectors:
   - `inbound_connections_total{route}` counter
   - `inbound_bytes_total{route,direction}` counter
@@ -156,63 +156,63 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
     denied, error)
   - `outbound_bytes_total{cid,direction}` counter
   - `config_reloads_total{result}` counter
-- [ ] provide `New() *Metrics` and an `http.Handler` (`promhttp.HandlerFor`
+- [x] provide `New() *Metrics` and an `http.Handler` (`promhttp.HandlerFor`
       against an isolated registry — no global state)
-- [ ] expose a `ServeMetrics(addr string)` helper that wires the handler
+- [x] expose a `ServeMetrics(addr string)` helper that wires the handler
       onto `/metrics`
-- [ ] write tests: registering and scraping the handler returns expected
+- [x] write tests: registering and scraping the handler returns expected
       metric names; label cardinality stays bounded
-- [ ] run `go test ./internal/metrics/...` — must pass before next task
+- [x] run `go test ./internal/metrics/...` — must pass before next task
 
 ### Task 5: TLS SNI parser
 
-- [ ] in `internal/inbound/sni.go` implement
+- [x] in `internal/inbound/sni.go` implement
       `SniffSNI(r io.Reader) (host string, buffered []byte, err error)`:
   - read the TLS record header and ClientHello
   - extract `server_name` from the extensions
   - return the full bytes consumed in `buffered` so the caller can replay
     them to the upstream vsock connection (transparent passthrough)
   - bounded read (reject records larger than a sane max, e.g. 16 KiB)
-- [ ] write tests using hand-crafted / recorded ClientHello bytes:
+- [x] write tests using hand-crafted / recorded ClientHello bytes:
   - valid SNI extracted (multiple hostnames)
   - ClientHello with no SNI → error
   - malformed record → error
   - oversized record → error
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 6: HTTP Host header sniffer
 
-- [ ] in `internal/inbound/httphost.go` implement
+- [x] in `internal/inbound/httphost.go` implement
       `SniffHost(r io.Reader) (host string, buffered []byte, err error)`:
   - read request line + headers into a buffer (up to max, e.g. 8 KiB)
   - parse `Host:` header; strip port if present
   - return buffered bytes so the caller can replay them
   - return error on malformed request or missing Host
-- [ ] write tests: normal request, header case variations, explicit port in
+- [x] write tests: normal request, header case variations, explicit port in
       Host, oversized headers, missing Host, malformed request line
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 7: vsockconn abstraction
 
-- [ ] in `internal/vsockconn/vsockconn.go` define:
+- [x] in `internal/vsockconn/vsockconn.go` define:
   - `Dialer` interface { `Dial(cid, port uint32) (net.Conn, error)` }
   - `Listener` interface — wraps `net.Listener` but `Accept()` also
     returns the peer CID
-- [ ] real implementation `NewVsockDialer()` / `ListenVsock(port uint32)`
+- [x] real implementation `NewVsockDialer()` / `ListenVsock(port uint32)`
       using `github.com/mdlayher/vsock`
-- [ ] loopback-TCP fallback for CI/dev: `NewLoopbackDialer(registry)` and
+- [x] loopback-TCP fallback for CI/dev: `NewLoopbackDialer(registry)` and
       `ListenLoopback(registry, cid, port)` — a small in-process registry
       maps `(cid, port)` to real `127.0.0.1:<ephemeral>` listeners, and the
       fallback Accept returns the fake peer CID
-- [ ] pick the backend via build tag or config flag
+- [x] pick the backend via build tag or config flag
       (`VSOCKD_BACKEND=loopback` env var used only by tests)
-- [ ] write tests for the loopback backend: dial/accept roundtrip, peer
+- [x] write tests for the loopback backend: dial/accept roundtrip, peer
       CID reported correctly, unknown CID → ECONNREFUSED-like error
-- [ ] run `go test ./internal/vsockconn/...` — must pass before next task
+- [x] run `go test ./internal/vsockconn/...` — must pass before next task
 
 ### Task 8: Inbound listener
 
-- [ ] in `internal/inbound/server.go` implement `Server` with
+- [x] in `internal/inbound/server.go` implement `Server` with
       `Start(ctx)` / `Shutdown(ctx)`:
   - listens on configured `bind:port` per inbound listener
   - for each accepted conn: sniff host (HTTP or TLS per mode), look up
@@ -222,17 +222,17 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
   - record metrics (connections, bytes, errors, denied-route)
   - graceful shutdown: stop accepting, wait for active copies up to a
     configurable grace period
-- [ ] write integration tests using the loopback vsock backend:
+- [x] write integration tests using the loopback vsock backend:
   - plain HTTP: request with matching Host routes to the right fake
     enclave; non-matching Host is closed with a log/metric
   - TLS: record a tiny fake ClientHello; matching SNI routed, non-matching
     closed
   - upstream failure propagates to client
-- [ ] run `go test ./internal/inbound/...` — must pass before next task
+- [x] run `go test ./internal/inbound/...` — must pass before next task
 
 ### Task 9: Outbound listener
 
-- [ ] in `internal/outbound/server.go` implement `Server` with
+- [x] in `internal/outbound/server.go` implement `Server` with
       `Start(ctx)` / `Shutdown(ctx)`:
   - opens one vsock listener per configured outbound port
   - on Accept, take peer CID; if not listed for this port → log, increment
@@ -246,43 +246,43 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
       response back; deny → 403
   - sensible timeouts on header read, upstream dial
   - metrics on every decision and byte counts
-- [ ] write integration tests using loopback vsock:
+- [x] write integration tests using loopback vsock:
   - allowed CONNECT to a local echo TCP server passes bytes both ways
   - denied CONNECT (allowlist miss) → 403, no upstream dial
   - allowed absolute-URI GET → response flows back
   - wrong peer CID for the port → connection closed
   - malformed request line → 400 then close
-- [ ] run `go test ./internal/outbound/...` — must pass before next task
+- [x] run `go test ./internal/outbound/...` — must pass before next task
 
 ### Task 10: Main wiring, signals, reload, graceful shutdown
 
-- [ ] wire `cmd/vsockd/main.go`:
+- [x] wire `cmd/vsockd/main.go`:
   - flags: `-config`, `-metrics-addr` (default `:9090`)
   - load config, construct `Metrics`, build inbound + outbound servers,
     start all with a shared `context.Context`
-- [ ] `SIGHUP` handler:
+- [x] `SIGHUP` handler:
   - reload config from disk, validate
   - diff: close listeners that disappeared, start listeners that appeared,
     update per-route/CID tables under a mutex
   - **existing connections continue to use the rules they started with**
     (simplest correct behaviour; document it)
   - increment `config_reloads_total{result="success"|"failure"}`
-- [ ] `SIGTERM`/`SIGINT` handler: stop all listeners, cancel context,
+- [x] `SIGTERM`/`SIGINT` handler: stop all listeners, cancel context,
       wait for active connections up to `shutdown-grace` (default 30s),
       then force-close remaining
-- [ ] structured logging everywhere via `slog`; JSON handler by default,
+- [x] structured logging everywhere via `slog`; JSON handler by default,
       text handler when stderr is a TTY (use `-log-format` flag)
-- [ ] write tests:
+- [x] write tests:
   - start binary in-process with a minimal config, hit `/metrics`, assert
     200 and expected metric names present
   - SIGHUP reload: change config on disk, send SIGHUP, verify new listener
     appears and a removed one is gone; existing conn survives
   - SIGTERM: verify graceful shutdown within grace window
-- [ ] run `go test ./...` — must pass before next task
+- [x] run `go test ./...` — must pass before next task
 
 ### Task 11: End-to-end integration smoke test
 
-- [ ] in `test/e2e/` (or `internal/integration/`) write a test that uses
+- [x] in `test/e2e/` (or `internal/integration/`) write a test that uses
       the loopback-vsock backend to run a full scenario:
   - spin up fake "enclave" that listens on loopback vsock + speaks HTTP
   - start `vsockd` in-process with a generated config
@@ -291,23 +291,23 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
   - outbound path: fake enclave dials loopback vsock, issues CONNECT to an
     allowed host → succeeds; issues CONNECT to a disallowed host → 403
   - SIGHUP reload adds a new route → new inbound TCP dial works
-- [ ] run `go test ./test/e2e/...` — must pass before next task
+- [x] run `go test ./test/e2e/...` — must pass before next task
 
 ### Task 12: Dockerfile and example config
 
-- [ ] multi-stage `Dockerfile`:
+- [x] multi-stage `Dockerfile`:
   - builder stage: `golang:1.26-alpine`, `CGO_ENABLED=0`,
     `go build -trimpath -ldflags "-s -w"`
   - runtime stage: `gcr.io/distroless/static-debian12:nonroot`
   - ENTRYPOINT `["/vsockd", "-config", "/etc/vsockd/vsockd.yaml"]`
-- [ ] finalise `examples/vsockd.yaml` with realistic annotated sample
-- [ ] add `docker` target to Makefile that builds the image
-- [ ] (no new tests — build verification only)
-- [ ] run `docker build .` — must succeed before next task
+- [x] finalise `examples/vsockd.yaml` with realistic annotated sample
+- [x] add `docker` target to Makefile that builds the image
+- [x] (no new tests — build verification only)
+- [x] run `docker build .` — must succeed before next task
 
 ### Task 13: README
 
-- [ ] `README.md` with:
+- [x] `README.md` with:
   - what it is / why / architecture diagram (ASCII ok)
   - build + install on host (systemd unit snippet)
   - config reference (link to example)
@@ -318,20 +318,22 @@ Module path: `github.com/olomix/vsockd`. Binary: `vsockd`.
 
 ### Task 14: Verify acceptance criteria
 
-- [ ] every responsibility from `idea.md` §Responsibilities is implemented
-- [ ] every non-functional requirement from `idea.md` is satisfied
-- [ ] `go vet ./...` clean
-- [ ] `go test ./...` green (race detector: `go test -race ./...`)
-- [ ] coverage ≥ 80% on `config`, `allowlist`, `inbound` parsers
-- [ ] `staticcheck ./...` clean (or the equivalent linter agreed on in
-      Task 1's Makefile)
-- [ ] `idea.md` §"Out of scope for v1" items confirmed absent (no TLS
-      termination code path, no rate limiter, no auth beyond CID)
+- [x] every responsibility from `idea.md` §Responsibilities is implemented
+- [x] every non-functional requirement from `idea.md` is satisfied
+- [x] `go vet ./...` clean
+- [x] `go test ./...` green (race detector: `go test -race ./...`)
+- [x] coverage ≥ 80% on `config` (92.6%), `allowlist` (97.7%), `inbound`
+      parsers (avg 84% across sni.go + httphost.go functions)
+- [x] `staticcheck ./...` clean (removed dead `httpEnclaveHandler` in
+      test/e2e/e2e_test.go that staticcheck flagged as U1000)
+- [x] `idea.md` §"Out of scope for v1" items confirmed absent (no TLS
+      termination code path — only SNI sniffing for passthrough; no rate
+      limiter; no auth beyond CID; no WebSocket-specific handling)
 
 ### Task 15: Documentation polish
 
-- [ ] cross-check README against final config shape (names may have drifted)
-- [ ] add CHANGELOG.md with a v0.1.0 entry
+- [x] cross-check README against final config shape (names may have drifted)
+- [x] add CHANGELOG.md with a v0.1.0 entry
 
 ## Technical Details
 

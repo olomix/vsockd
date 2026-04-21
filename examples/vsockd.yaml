@@ -1,0 +1,59 @@
+# vsockd example configuration.
+#
+# Two inbound listeners (HTTPS transparent SNI passthrough + plaintext HTTP
+# Host-based routing), a shared forward-proxy outbound port for two enclaves
+# with per-CID egress allowlists, plus a dedicated unrestricted port for a
+# test enclave. The schema is documented in internal/config/config.go and
+# validated strictly at load time.
+
+inbound:
+  # HTTPS: terminate TCP on the host, extract SNI, pass the TLS record
+  # through untouched to the enclave — the enclave owns the cert.
+  - bind: 0.0.0.0
+    port: 443
+    mode: tls-sni
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8443
+      - hostname: admin.example.com
+        cid: 20
+        vsock_port: 8443
+
+  # HTTP: route by Host header.
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+
+outbound:
+  # Shared forward-proxy vsock port used by two enclaves. Each CID carries
+  # its own egress allowlist; a CID may not appear under more than one port.
+  - port: 8080
+    cids:
+      - cid: 16
+        allowed_hosts:
+          - "api.stripe.com:443"
+          - "*.s3.amazonaws.com:443"
+      - cid: 20
+        allowed_hosts:
+          - "*.internal.example.com:443"
+
+  # Dedicated port for a test enclave with no egress restrictions.
+  - port: 8082
+    cids:
+      - cid: 42
+        allowed_hosts:
+          - "*"
+
+metrics:
+  bind: 0.0.0.0:9090
+
+# Maximum time to wait for in-flight connections to drain on SIGTERM.
+shutdown_grace: 30s
+
+# json | text | auto — "auto" picks text when stderr is a TTY.
+log_format: json
