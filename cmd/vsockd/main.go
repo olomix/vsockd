@@ -31,8 +31,10 @@ func run(args []string, stdout, stderr *os.File) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "/etc/vsockd/vsockd.yaml",
 		"path to YAML config file")
-	metricsAddr := fs.String("metrics-addr", ":9090",
-		"listen address for the Prometheus /metrics endpoint")
+	metricsAddr := fs.String("metrics-addr", "",
+		"TCP listen address for the Prometheus /metrics endpoint "+
+			"(overrides metrics.bind / metrics.vsock_port in the "+
+			"config file). Empty and no metrics section = disabled.")
 	logFormat := fs.String("log-format", "",
 		"log format: json | text | auto (empty uses config.log_format)")
 	debug := fs.Bool("debug", false,
@@ -79,13 +81,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		"version", version, "config", *configPath,
 		"vsock_backend", backend, "log_level", level.String())
 
+	metricsAddrRes, metricsVsockPort := resolveMetrics(fs, *metricsAddr, cfg)
 	a, err := app.New(app.Options{
-		ConfigPath:    *configPath,
-		Config:        cfg,
-		Logger:        logger,
-		MetricsAddr:   resolveMetricsAddr(fs, *metricsAddr, cfg),
-		VsockDialer:   dialer,
-		VsockListenFn: listenFn,
+		ConfigPath:       *configPath,
+		Config:           cfg,
+		Logger:           logger,
+		MetricsAddr:      metricsAddrRes,
+		MetricsVsockPort: metricsVsockPort,
+		VsockDialer:      dialer,
+		VsockListenFn:    listenFn,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "vsockd: %v\n", err)
@@ -197,10 +201,15 @@ func resolveLogLevel(debug bool, envVar, cfgLevel string) (slog.Level, error) {
 	return slog.LevelInfo, nil
 }
 
-// resolveMetricsAddr lets the YAML config override the compiled-in flag
-// default, while any explicitly-passed flag still wins. The flag package
-// exposes Visit for walking user-set flags.
-func resolveMetricsAddr(fs *flag.FlagSet, flagVal string, cfg *config.Config) string {
+// resolveMetrics picks the metrics transport. Precedence: explicit
+// -metrics-addr flag > metrics.bind > metrics.vsock_port > disabled. An
+// explicit flag always wins and forces TCP even if YAML declared vsock; this
+// matches the flag's "operator override" role. config.Validate rejects
+// Bind and VsockPort both being non-zero, so the YAML path yields at most
+// one transport.
+func resolveMetrics(
+	fs *flag.FlagSet, flagVal string, cfg *config.Config,
+) (addr string, vsockPort uint32) {
 	userSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "metrics-addr" {
@@ -208,12 +217,15 @@ func resolveMetricsAddr(fs *flag.FlagSet, flagVal string, cfg *config.Config) st
 		}
 	})
 	if userSet {
-		return flagVal
+		return flagVal, 0
 	}
 	if cfg.Metrics.Bind != "" {
-		return cfg.Metrics.Bind
+		return cfg.Metrics.Bind, 0
 	}
-	return flagVal
+	if cfg.Metrics.VsockPort != 0 {
+		return "", cfg.Metrics.VsockPort
+	}
+	return "", 0
 }
 
 // selectVsockBackend returns the dialer, listen function, and a short label

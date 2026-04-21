@@ -105,9 +105,15 @@ type VsockToTCPListener struct {
 	Upstream string `yaml:"upstream"`
 }
 
-// MetricsConfig controls the Prometheus HTTP endpoint.
+// MetricsConfig controls the Prometheus /metrics endpoint. Exactly one of
+// Bind or VsockPort may be set. Leaving both empty disables the endpoint;
+// the CLI flag can still opt back in.
 type MetricsConfig struct {
+	// Bind is a TCP host:port (e.g. "0.0.0.0:9090") for host-side deployments.
 	Bind string `yaml:"bind"`
+	// VsockPort exposes /metrics over vsock from VMADDR_CID_ANY. Intended
+	// for enclave-side vsockd so the parent host can scrape over vsock.
+	VsockPort uint32 `yaml:"vsock_port"`
 }
 
 // Duration is a time.Duration that unmarshals from a human string like "30s".
@@ -271,9 +277,24 @@ func (c *Config) Validate() error {
 			c.ShutdownGrace.Duration())
 	}
 
+	if c.Metrics.Bind != "" && c.Metrics.VsockPort != 0 {
+		return errors.New(
+			"metrics.bind and metrics.vsock_port are mutually exclusive")
+	}
 	if c.Metrics.Bind != "" {
 		if _, _, err := net.SplitHostPort(c.Metrics.Bind); err != nil {
 			return fmt.Errorf("metrics.bind %q: %w", c.Metrics.Bind, err)
+		}
+	}
+	if c.Metrics.VsockPort != 0 {
+		if c.Metrics.VsockPort >= vsockPortAny {
+			return fmt.Errorf("metrics.vsock_port %d out of range",
+				c.Metrics.VsockPort)
+		}
+		if prev, ok := seenPort[c.Metrics.VsockPort]; ok {
+			return fmt.Errorf(
+				"metrics.vsock_port %d already declared in %s",
+				c.Metrics.VsockPort, prev)
 		}
 	}
 

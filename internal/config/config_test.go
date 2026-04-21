@@ -509,6 +509,58 @@ vsock_to_tcp:
 			want: "duplicate port 9000 already declared in outbound[0]",
 		},
 		{
+			name: "metrics bind and vsock_port both set",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  bind: "0.0.0.0:9090"
+  vsock_port: 9090
+`,
+			want: "metrics.bind and metrics.vsock_port are mutually exclusive",
+		},
+		{
+			name: "metrics vsock_port out of range (PortAny)",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  vsock_port: 4294967295
+`,
+			want: "metrics.vsock_port 4294967295 out of range",
+		},
+		{
+			name: "metrics vsock_port collides with outbound",
+			yaml: `
+outbound:
+  - port: 9090
+    cids:
+      - {cid: 16, allowed_hosts: ["*"]}
+metrics:
+  vsock_port: 9090
+`,
+			want: "metrics.vsock_port 9090 already declared in outbound[0]",
+		},
+		{
+			name: "metrics vsock_port collides with vsock_to_tcp",
+			yaml: `
+vsock_to_tcp:
+  - port: 9090
+    upstream: "10.0.0.5:5432"
+metrics:
+  vsock_port: 9090
+`,
+			want: "metrics.vsock_port 9090 already declared in vsock_to_tcp[0]",
+		},
+		{
 			name: "invalid log_level",
 			yaml: `
 inbound:
@@ -601,6 +653,52 @@ vsock_to_tcp:
 	}
 	if got := cfg.VsockToTCP[1].Upstream; got != "db.internal:3306" {
 		t.Fatalf("vsock_to_tcp[1].Upstream = %q", got)
+	}
+}
+
+// TestLoadMetricsVsockPort verifies metrics.vsock_port round-trips through
+// the schema without triggering the mutual-exclusion rule.
+func TestLoadMetricsVsockPort(t *testing.T) {
+	yamlDoc := `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  vsock_port: 9090
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Metrics.VsockPort; got != 9090 {
+		t.Fatalf("metrics.vsock_port = %d, want 9090", got)
+	}
+	if cfg.Metrics.Bind != "" {
+		t.Fatalf("metrics.bind = %q, want empty", cfg.Metrics.Bind)
+	}
+}
+
+// TestLoadMetricsEmpty verifies that omitting the metrics section leaves
+// both Bind and VsockPort zero-valued — this is the new disable-by-default
+// default.
+func TestLoadMetricsEmpty(t *testing.T) {
+	yamlDoc := `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics.Bind != "" || cfg.Metrics.VsockPort != 0 {
+		t.Fatalf("metrics should be empty by default, got %+v", cfg.Metrics)
 	}
 }
 

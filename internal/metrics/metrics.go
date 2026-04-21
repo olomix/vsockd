@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/olomix/vsockd/internal/vsockconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -213,6 +214,30 @@ func FormatCID(cid uint32) string {
 func ListenMetrics(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
+
+// vsockNetListener adapts vsockconn.Listener (whose Accept returns the
+// typed vsockconn.Conn) into a net.Listener. ServeMetrics only needs
+// Accept/Close/Addr, so the adapter is three trivial methods.
+type vsockNetListener struct {
+	inner vsockconn.Listener
+}
+
+// NewVsockNetListener wraps a vsockconn.Listener so it can be passed to
+// ServeMetrics. Used when /metrics is exposed over AF_VSOCK.
+func NewVsockNetListener(ln vsockconn.Listener) net.Listener {
+	return &vsockNetListener{inner: ln}
+}
+
+func (v *vsockNetListener) Accept() (net.Conn, error) {
+	c, err := v.inner.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (v *vsockNetListener) Close() error   { return v.inner.Close() }
+func (v *vsockNetListener) Addr() net.Addr { return v.inner.Addr() }
 
 // ServeMetrics runs the /metrics HTTP server on ln and blocks until ctx is
 // cancelled or the server fails. On cancellation, srv.Shutdown is given up

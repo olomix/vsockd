@@ -376,60 +376,51 @@ metrics:
 # Disabled: simply omit the metrics section (new default)
 ```
 
-- [ ] in `internal/config/config.go`: add `VsockPort uint32` field with
+- [x] in `internal/config/config.go`: add `VsockPort uint32` field with
       tag `yaml:"vsock_port"` to `MetricsConfig`
-- [ ] in `internal/config/config.go` (`Config.Validate`): enforce
+- [x] in `internal/config/config.go` (`Config.Validate`): enforce
       mutual exclusion (`Bind != "" && VsockPort != 0` is an error);
       validate `VsockPort` is in the valid vsock range (non-zero,
       not `vsockPortAny`) when set; keep the existing `net.SplitHostPort`
       check on `Bind`
-- [ ] in `internal/config/config.go` (`Config.Validate`): cross-section
+- [x] in `internal/config/config.go` (`Config.Validate`): cross-section
       check — `metrics.vsock_port` must not collide with any
       `outbound[*].port` or `vsock_to_tcp[*].port`
-- [ ] in `internal/config/config_test.go`: add tests for each new rule
+- [x] in `internal/config/config_test.go`: add tests for each new rule
       (valid vsock-port-only config, valid bind-only config, both-set
       rejected, vsock_port colliding with outbound rejected,
       vsock_port colliding with vsock_to_tcp rejected, vsock_port out
       of range rejected)
-- [ ] in `internal/app/app.go`: replace `Options.MetricsAddr string`
-      with a richer form — either two fields (`MetricsAddr string` +
-      `MetricsVsockPort uint32`) or one tagged struct. Two fields is
-      simpler and matches the config shape; pick that. Update `Start`
-      to branch on which is set: TCP path uses
-      `metrics.ListenMetrics(addr)`, vsock path uses
-      `opts.VsockListenFn(port)`; nothing set = skip the listener and
-      log `metrics disabled`
-- [ ] in `internal/app/app.go`: the existing startup log line
-      `"vsockd started"` needs a richer metrics summary — e.g.
-      `metrics="disabled"`, `metrics="tcp 0.0.0.0:9090"`, or
-      `metrics="vsock port=9090"`. Pick one string convention and
-      stick with it so log consumers can parse
-- [ ] in `cmd/vsockd/main.go`: change the flag default from `":9090"`
-      to `""`; update the flag help text
-- [ ] in `cmd/vsockd/main.go` (`resolveMetricsAddr`): rewrite to return
-      a small struct (or two values — tcp addr + vsock port)
-      reflecting the new precedence: explicit flag > yaml bind > yaml
-      vsock_port > disabled. Rename to `resolveMetrics` since it now
-      picks a transport, not just an address
-- [ ] in `cmd/vsockd/main.go`: verify `vsockconn.Listener` satisfies
-      `net.Listener` (it should — `outbound` already uses it with
-      `http.Server`-style code paths via the accept loop). If it
-      doesn't, add a small adapter in `internal/metrics/metrics.go`
-      next to `ListenMetrics`. Check by trying `go build` after
-      writing the app.go change
-- [ ] in `cmd/vsockd/main_test.go`: update or add tests that exercise
-      the new resolution rules (flag set with no yaml; yaml bind with
-      no flag; yaml vsock_port with no flag; nothing set = no listener
-      line in startup logs); existing tests that assumed a `:9090`
-      default need updating to either pass `-metrics-addr` explicitly
-      or to stop asserting on `/metrics` reachability
-- [ ] in `internal/app/app_test.go`: add a test that App starts cleanly
-      with metrics disabled (no `MetricsAddr`, no `MetricsVsockPort`)
-      and no `/metrics` listener is present
-- [ ] in `internal/app/app_test.go`: add a test that App starts with
-      `MetricsVsockPort` set and `/metrics` is scrapable over the
-      loopback vsock backend
-- [ ] run full test suite — must pass before Task 4
+- [x] in `internal/app/app.go`: replaced `Options.MetricsAddr string` with
+      two fields (`MetricsAddr string` + `MetricsVsockPort uint32`); `Start`
+      branches on which is set (TCP path via `metrics.ListenMetrics(addr)`,
+      vsock path via `opts.VsockListenFn(port)` wrapped in
+      `metrics.NewVsockNetListener`); nothing set skips the listener and
+      logs `metrics=disabled`
+- [x] in `internal/app/app.go`: the startup log key changed from
+      `metrics_addr` to a richer `metrics` string — `"disabled"`,
+      `"tcp <addr>"`, or `"vsock port=<n>"`
+- [x] in `cmd/vsockd/main.go`: flag default changed from `":9090"` to
+      `""`; help text rewritten to describe the new precedence
+- [x] in `cmd/vsockd/main.go`: `resolveMetricsAddr` renamed to
+      `resolveMetrics` and now returns `(addr string, vsockPort uint32)`
+      with precedence explicit flag > yaml bind > yaml vsock_port >
+      disabled
+- [x] `vsockconn.Listener` does NOT satisfy `net.Listener` (its Accept
+      returns the typed `vsockconn.Conn` rather than `net.Conn`). Added
+      `metrics.NewVsockNetListener` adapter in `internal/metrics/metrics.go`
+      that unwraps the typed conn — only Accept/Close/Addr are used by
+      `ServeMetrics`
+- [x] in `cmd/vsockd/main_test.go`: added `TestResolveMetricsPrecedence`
+      covering flag > yaml bind > yaml vsock_port > disabled and the
+      explicit-empty-flag-wins case; existing subprocess tests already
+      pass `-metrics-addr` explicitly so they need no change
+- [x] in `internal/app/app_test.go`: added `TestMetricsDisabled` covering
+      the no-MetricsAddr + no-MetricsVsockPort path
+- [x] in `internal/app/app_test.go`: added `TestMetricsOverVsock` which
+      scrapes `/metrics` over the loopback vsock backend after priming
+      a counter series
+- [x] run full test suite — must pass before Task 4
 
 ### Task 4: Rename TCP passthrough debug log messages
 

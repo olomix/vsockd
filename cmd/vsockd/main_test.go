@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/olomix/vsockd/internal/config"
 )
 
 // TestMain lets the test binary re-exec itself as the real vsockd entry
@@ -313,6 +316,77 @@ shutdown_grace: 2s
 	if c, err := net.DialTimeout("tcp", oldAddr, 200*time.Millisecond); err == nil {
 		_ = c.Close()
 		t.Fatalf("old listener still accepting after SIGHUP")
+	}
+}
+
+// TestResolveMetricsPrecedence covers the flag > yaml.bind > yaml.vsock_port
+// > disabled resolution order that governs the metrics transport choice.
+func TestResolveMetricsPrecedence(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagArgs      []string
+		cfgBind       string
+		cfgVsockPort  uint32
+		wantAddr      string
+		wantVsockPort uint32
+	}{
+		{
+			name:     "explicit flag wins over yaml bind",
+			flagArgs: []string{"-metrics-addr", "127.0.0.1:12345"},
+			cfgBind:  "127.0.0.1:9999",
+			wantAddr: "127.0.0.1:12345",
+		},
+		{
+			name:         "explicit flag wins over yaml vsock_port",
+			flagArgs:     []string{"-metrics-addr", "127.0.0.1:12345"},
+			cfgVsockPort: 9090,
+			wantAddr:     "127.0.0.1:12345",
+		},
+		{
+			name:     "yaml bind used when flag unset",
+			flagArgs: nil,
+			cfgBind:  "0.0.0.0:9090",
+			wantAddr: "0.0.0.0:9090",
+		},
+		{
+			name:          "yaml vsock_port used when flag unset",
+			flagArgs:      nil,
+			cfgVsockPort:  9090,
+			wantVsockPort: 9090,
+		},
+		{
+			name:     "nothing set = disabled",
+			flagArgs: nil,
+		},
+		{
+			name:     "explicit empty flag = disabled (overrides yaml)",
+			flagArgs: []string{"-metrics-addr", ""},
+			cfgBind:  "0.0.0.0:9090",
+			// userSet=true forces flagVal ("") to win.
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("vsockd-test", flag.ContinueOnError)
+			addr := fs.String("metrics-addr", "", "")
+			if err := fs.Parse(tc.flagArgs); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			cfg := &config.Config{
+				Metrics: config.MetricsConfig{
+					Bind:      tc.cfgBind,
+					VsockPort: tc.cfgVsockPort,
+				},
+			}
+			gotAddr, gotVsock := resolveMetrics(fs, *addr, cfg)
+			if gotAddr != tc.wantAddr {
+				t.Errorf("addr = %q, want %q", gotAddr, tc.wantAddr)
+			}
+			if gotVsock != tc.wantVsockPort {
+				t.Errorf("vsockPort = %d, want %d",
+					gotVsock, tc.wantVsockPort)
+			}
+		})
 	}
 }
 
