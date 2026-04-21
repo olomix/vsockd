@@ -550,8 +550,8 @@ hard breaking change. The entry must include:
 - a short migration snippet showing the old YAML next to the new YAML
   (cover the tcp-mode rename AND the metrics behavior change)
 
-- [ ] append an entry to `CHANGELOG.md` per the above
-- [ ] no test changes
+- [x] append an entry to `CHANGELOG.md` per the above
+- [x] no test changes
 
 ### Task 8: Verify acceptance criteria
 
