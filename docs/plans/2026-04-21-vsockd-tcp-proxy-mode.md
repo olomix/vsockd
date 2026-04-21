@@ -267,21 +267,25 @@ backward-compatible.
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: TCP
+- [x] verify all requirements from Overview are implemented: TCP
   passthrough both directions, debug log messages on vsock side
   (CID:port, total bytes), debug log messages on TCP side (IP:port,
   total bytes)
-- [ ] verify debug toggle works via all three sources (`-debug` flag,
+- [x] verify debug toggle works via all three sources (`-debug` flag,
   `VSOCKD_LOG_LEVEL=debug`, yaml `log_level: debug`) with correct
   precedence
-- [ ] verify existing HTTP inbound and HTTP-forward-proxy outbound
+- [x] verify existing HTTP inbound and HTTP-forward-proxy outbound
   behaviour is unchanged (regression-test the existing e2e scenarios)
-- [ ] run `go test -race ./...` — all tests must pass
-- [ ] run `go vet ./...` — must be clean
-- [ ] run `staticcheck ./...` — must be clean
-- [ ] verify coverage: `go test -cover ./internal/...` on `config`,
-  `inbound`, `outbound`, `metrics` — maintain 80%+ on the packages the
-  initial plan targeted (config 92%+, allowlist 97%+ unchanged)
+- [x] run `go test -race ./...` — all tests must pass (fixed a race in
+  `TestTCP_Passthrough_ContextCancelViaShutdown`: the test now gates on
+  upstream Accept so Shutdown only runs after handleTCP is parked in
+  shuttleTCP)
+- [x] run `go vet ./...` — must be clean
+- [x] run `staticcheck ./...` — must be clean
+- [x] verify coverage: `go test -cover ./internal/...` on `config`,
+  `inbound`, `outbound`, `metrics` — config 95.4% (target 92%+),
+  allowlist 97.7% (unchanged), metrics 82.6%, inbound 79.1%
+  (up from 76.2% baseline), outbound 69.0% (up from 62.7% baseline)
 
 ### Task 8: [Final] Update documentation
 

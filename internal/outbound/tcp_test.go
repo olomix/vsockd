@@ -386,17 +386,25 @@ func TestTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 // shutdown grace window.
 func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	// A silent upstream keeps the bidirectional copy parked until the
-	// server tears things down.
+	// server tears things down. upstreamReady signals that the handler's
+	// upstream dial landed, so the shuttleTCP is guaranteed to be running
+	// before we call Shutdown — without this, the test races the accept
+	// loop and can see a no-op Shutdown that returns before its deadline.
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = upstream.Close() })
+	upstreamReady := make(chan struct{}, 1)
 	go func() {
 		for {
 			c, err := upstream.Accept()
 			if err != nil {
 				return
+			}
+			select {
+			case upstreamReady <- struct{}{}:
+			default:
 			}
 			// Hold until close; no echo, no writes.
 			go func(c net.Conn) {
@@ -435,6 +443,14 @@ func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	defer c.Close()
 	if _, err := c.Write([]byte("x")); err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+
+	// Gate on the upstream accept so handleTCP is definitely parked in
+	// shuttleTCP before Shutdown races the accept loop.
+	select {
+	case <-upstreamReady:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("upstream never accepted")
 	}
 
 	// Shutdown with an expired deadline must return a ctx error — the
