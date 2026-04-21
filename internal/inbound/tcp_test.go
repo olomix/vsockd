@@ -17,6 +17,9 @@ import (
 	"github.com/olomix/vsockd/internal/config"
 	"github.com/olomix/vsockd/internal/metrics"
 	"github.com/olomix/vsockd/internal/vsockconn"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // logRecord is a JSON-shaped slog record captured by captureHandler. Tests
@@ -516,6 +519,124 @@ func TestInboundTCP_NewListenerAcceptsTCPMode(t *testing.T) {
 	// so the HTTP path's behaviour is never accidentally triggered.
 	if rm := l.routesSnapshot(); rm != nil {
 		t.Errorf("routesSnapshot for TCP mode = %v, want nil", rm)
+	}
+}
+
+// plainCounterValue reads the current value out of a labelless
+// prometheus.Counter, paralleling the counterValue helper used for
+// CounterVec in server_test.go.
+func plainCounterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	dm := &dto.Metric{}
+	if err := c.Write(dm); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if dm.Counter == nil {
+		t.Fatalf("metric has no counter payload")
+	}
+	return dm.Counter.GetValue()
+}
+
+// waitForPlainCounter polls until the labelless counter reaches want or
+// the deadline elapses.
+func waitForPlainCounter(t *testing.T, c prometheus.Counter, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if plainCounterValue(t, c) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("plain counter did not reach %v; got %v",
+		want, plainCounterValue(t, c))
+}
+
+// TestInboundTCP_Passthrough_MetricsIncrement verifies the mode=tcp
+// inbound handler increments the new counters: one connection, byte
+// totals matching the echo round-trip, no error counters touched.
+func TestInboundTCP_Passthrough_MetricsIncrement(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const enclaveCID uint32 = 16
+	const vsockPort uint32 = 8080
+	startTCPEchoTarget(t, reg, enclaveCID, vsockPort)
+
+	m := metrics.New()
+	cfg := []config.InboundListener{{
+		Bind:       "127.0.0.1",
+		Port:       0,
+		Mode:       config.ModeTCP,
+		TargetCID:  enclaveCID,
+		TargetPort: vsockPort,
+	}}
+	s := startTCPInboundServer(t, cfg,
+		vsockconn.NewLoopbackDialer(reg, 2), m, discardLogger())
+
+	client, err := net.Dial("tcp", s.Addr(0).String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	payload := []byte("metrics-payload-0123")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = client.(*net.TCPConn).CloseWrite()
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(client); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	_ = client.Close()
+
+	waitForPlainCounter(t, m.TCPInboundConnections, 1)
+	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+		metrics.DirectionUp)
+	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+		metrics.DirectionDown)
+
+	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorDial); got != 0 {
+		t.Errorf("dial error counter = %v, want 0", got)
+	}
+	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorCopy); got != 0 {
+		t.Errorf("copy error counter = %v, want 0", got)
+	}
+}
+
+// TestInboundTCP_Passthrough_MetricsDialFail verifies the dial_fail
+// counter increments exactly once when the vsock target refuses, and
+// that no bytes are recorded for that connection.
+func TestInboundTCP_Passthrough_MetricsDialFail(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const enclaveCID uint32 = 16
+	const vsockPort uint32 = 8080
+
+	m := metrics.New()
+	cfg := []config.InboundListener{{
+		Bind:       "127.0.0.1",
+		Port:       0,
+		Mode:       config.ModeTCP,
+		TargetCID:  enclaveCID,
+		TargetPort: vsockPort,
+	}}
+	s := startTCPInboundServer(t, cfg,
+		vsockconn.NewLoopbackDialer(reg, 2), m, discardLogger())
+
+	client, err := net.Dial("tcp", s.Addr(0).String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, _ = client.Read(buf)
+	_ = client.Close()
+
+	waitForPlainCounter(t, m.TCPInboundConnections, 1)
+	waitForCounter(t, m.TCPInboundErrors, 1, metrics.TCPErrorDial)
+
+	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionUp); got != 0 {
+		t.Errorf("DirectionUp bytes = %v, want 0", got)
+	}
+	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionDown); got != 0 {
+		t.Errorf("DirectionDown bytes = %v, want 0", got)
 	}
 }
 

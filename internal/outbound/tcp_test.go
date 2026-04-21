@@ -15,6 +15,9 @@ import (
 	"github.com/olomix/vsockd/internal/config"
 	"github.com/olomix/vsockd/internal/metrics"
 	"github.com/olomix/vsockd/internal/vsockconn"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // logRecord is a JSON-shaped slog record captured by captureHandler. The
@@ -487,6 +490,135 @@ func TestTCP_Passthrough_UpstreamSwap(t *testing.T) {
 	l.upstream.Store(&replacement)
 	if got := l.upstreamSnapshot(); got != replacement {
 		t.Errorf("after swap upstream = %q, want %q", got, replacement)
+	}
+}
+
+// plainCounterValue reads the current value out of a labelless
+// prometheus.Counter, paralleling counterValue for CounterVec helpers.
+func plainCounterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	dm := &dto.Metric{}
+	if err := c.Write(dm); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if dm.Counter == nil {
+		t.Fatalf("metric has no counter payload")
+	}
+	return dm.Counter.GetValue()
+}
+
+// waitForPlainCounter polls until the labelless counter reaches want or
+// the deadline elapses. Byte counters are incremented after the handler
+// releases the connection, so a naive read races the test's ReadAll.
+func waitForPlainCounter(t *testing.T, c prometheus.Counter, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if plainCounterValue(t, c) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("plain counter did not reach %v; got %v",
+		want, plainCounterValue(t, c))
+}
+
+// TestTCP_Passthrough_MetricsIncrement verifies the mode=tcp outbound
+// handler increments the new counters: one connection, byte totals
+// matching the echo round-trip, no error counters touched.
+func TestTCP_Passthrough_MetricsIncrement(t *testing.T) {
+	echo := startEchoServer(t)
+
+	reg := vsockconn.NewRegistry()
+	const enclaveCID uint32 = 16
+	const vsockPort uint32 = 8080
+
+	m := metrics.New()
+	cfgs := []config.OutboundListener{{
+		Port:     vsockPort,
+		Mode:     config.ModeTCP,
+		Upstream: echo.Addr().String(),
+	}}
+	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m,
+		discardLogger())
+
+	c, err := vsockconn.NewLoopbackDialer(reg, enclaveCID).
+		Dial(hostCID, vsockPort)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	payload := []byte("metrics-payload-0123")
+	if _, err := c.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	_ = c.Close()
+
+	// Connections counter records one accept even though the dial and the
+	// close happen asynchronously; bytes are incremented after both
+	// shuttle directions finish, so poll on those.
+	waitForPlainCounter(t, m.TCPOutboundConnections, 1)
+	waitForCounter(t, m.TCPOutboundBytes, float64(len(payload)),
+		metrics.DirectionUp)
+	waitForCounter(t, m.TCPOutboundBytes, float64(len(payload)),
+		metrics.DirectionDown)
+
+	if got := counterValue(t, m.TCPOutboundErrors, metrics.TCPErrorDial); got != 0 {
+		t.Errorf("dial error counter = %v, want 0", got)
+	}
+	if got := counterValue(t, m.TCPOutboundErrors, metrics.TCPErrorCopy); got != 0 {
+		t.Errorf("copy error counter = %v, want 0", got)
+	}
+}
+
+// TestTCP_Passthrough_MetricsDialFail verifies the dial_fail counter
+// increments exactly once when the upstream dial cannot complete, and
+// that no bytes are recorded in that case.
+func TestTCP_Passthrough_MetricsDialFail(t *testing.T) {
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := dead.Addr().String()
+	_ = dead.Close()
+
+	reg := vsockconn.NewRegistry()
+	const enclaveCID uint32 = 16
+	const vsockPort uint32 = 8080
+
+	m := metrics.New()
+	cfgs := []config.OutboundListener{{
+		Port:     vsockPort,
+		Mode:     config.ModeTCP,
+		Upstream: deadAddr,
+	}}
+	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m,
+		discardLogger())
+
+	c, err := vsockconn.NewLoopbackDialer(reg, enclaveCID).
+		Dial(hostCID, vsockPort)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, _ = c.Read(buf)
+	_ = c.Close()
+
+	waitForPlainCounter(t, m.TCPOutboundConnections, 1)
+	waitForCounter(t, m.TCPOutboundErrors, 1, metrics.TCPErrorDial)
+
+	if got := counterValue(t, m.TCPOutboundBytes, metrics.DirectionUp); got != 0 {
+		t.Errorf("DirectionUp bytes = %v, want 0", got)
+	}
+	if got := counterValue(t, m.TCPOutboundBytes, metrics.DirectionDown); got != 0 {
+		t.Errorf("DirectionDown bytes = %v, want 0", got)
 	}
 }
 

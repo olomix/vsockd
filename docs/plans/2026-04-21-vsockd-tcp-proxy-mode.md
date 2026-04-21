@@ -227,17 +227,17 @@ backward-compatible.
 
 ### Task 5: Add metrics for TCP-mode listeners
 
-- [ ] in `internal/metrics/metrics.go`: add counters following the
+- [x] in `internal/metrics/metrics.go`: add counters following the
   existing fixed-cardinality pattern — `tcp_inbound_connections_total`,
   `tcp_inbound_bytes_total{direction=up|down}`,
   `tcp_outbound_connections_total`,
   `tcp_outbound_bytes_total{direction=up|down}`, and
   `tcp_*_errors_total{reason=dial_fail|copy_error}`
-- [ ] call the new counters from the TCP handlers in Tasks 3 and 4
-- [ ] add tests in `metrics_test.go` verifying the counters exist with
+- [x] call the new counters from the TCP handlers in Tasks 3 and 4
+- [x] add tests in `metrics_test.go` verifying the counters exist with
   the expected label sets (no cardinality explosion) and increment
   correctly when the handlers are exercised from the TCP test helpers
-- [ ] run `go test ./internal/metrics/...` and
+- [x] run `go test ./internal/metrics/...` and
   `go test -race ./internal/{inbound,outbound}/...` — must pass before
   next task
 

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/olomix/vsockd/internal/metrics"
 )
 
 // shuttleDrainTimeout bounds how long shuttleTCP waits for the reverse
@@ -40,12 +42,15 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 	targetCID := l.targetCID.Load()
 	targetPort := l.targetPort.Load()
 
+	l.server.metric.TCPInboundConnections.Inc()
 	l.server.logger.Debug("inbound tcp connection",
 		"remote", remoteAddr,
 		"listen", listenAddr)
 
 	upstream, err := l.dialUpstream(targetCID, targetPort)
 	if err != nil {
+		l.server.metric.TCPInboundErrors.
+			WithLabelValues(metrics.TCPErrorDial).Inc()
 		l.server.logger.Warn("inbound tcp dial failed",
 			"remote", remoteAddr,
 			"listen", listenAddr,
@@ -62,7 +67,16 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 	l.server.trackConn(upstream)
 	defer l.server.untrackConn(upstream)
 
-	upBytes, downBytes := shuttleTCP(c, upstream)
+	upBytes, downBytes, copyErrored := shuttleTCP(c, upstream)
+
+	l.server.metric.TCPInboundBytes.
+		WithLabelValues(metrics.DirectionUp).Add(float64(upBytes))
+	l.server.metric.TCPInboundBytes.
+		WithLabelValues(metrics.DirectionDown).Add(float64(downBytes))
+	if copyErrored {
+		l.server.metric.TCPInboundErrors.
+			WithLabelValues(metrics.TCPErrorCopy).Inc()
+	}
 
 	l.server.logger.Debug("tcp connection closed",
 		"remote", remoteAddr,
@@ -71,8 +85,10 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 }
 
 // shuttleTCP runs a bidirectional io.Copy between client (TCP side) and
-// upstream (vsock side). Returns (up, down) where up is bytes copied
-// from client→upstream and down is bytes copied from upstream→client.
+// upstream (vsock side). Returns (up, down, copyErrored) where up is
+// bytes copied from client→upstream, down is bytes copied from
+// upstream→client, and copyErrored reports whether either direction
+// ended with an error beyond the expected EOF / local-close set.
 //
 // Close semantics:
 //   - First direction returns with nil error (clean EOF / half-close
@@ -88,7 +104,7 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 // The outer handler's defer'd Close tears the connections down once
 // both directions have returned; calling Close() here first is
 // idempotent.
-func shuttleTCP(client net.Conn, upstream net.Conn) (int64, int64) {
+func shuttleTCP(client net.Conn, upstream net.Conn) (int64, int64, bool) {
 	type result struct {
 		which int
 		err   error
@@ -123,12 +139,22 @@ func shuttleTCP(client net.Conn, upstream net.Conn) (int64, int64) {
 		_ = upstream.Close()
 	}
 
+	var second result
 	select {
-	case <-done:
+	case second = <-done:
 	case <-time.After(shuttleDrainTimeout):
 		_ = client.Close()
 		_ = upstream.Close()
-		<-done
+		second = <-done
 	}
-	return up, dn
+	copyErrored := isUnexpectedCopyErr(first.err) ||
+		isUnexpectedCopyErr(second.err)
+	return up, dn, copyErrored
+}
+
+// isUnexpectedCopyErr inverts the shared isExpectedCopyErr helper so the
+// TCP handler can read naturally: "did this direction end with an error
+// worth counting?". EOF and locally-initiated close are filtered out.
+func isUnexpectedCopyErr(err error) bool {
+	return err != nil && !isExpectedCopyErr(err)
 }
