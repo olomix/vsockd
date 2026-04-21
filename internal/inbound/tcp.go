@@ -42,7 +42,7 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 	targetCID := l.targetCID.Load()
 	targetPort := l.targetPort.Load()
 
-	l.server.metric.TCPInboundConnections.Inc()
+	l.server.metric.TCPToVsockConnections.Inc()
 	l.server.logger.Debug("inbound tcp connection",
 		"remote", remoteAddr,
 		"listen", listenAddr)
@@ -54,7 +54,7 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 		// warn-level log so shutdown does not look like an incident.
 		shutdownCancel := l.server.dialCtx.Err() != nil
 		if !shutdownCancel {
-			l.server.metric.TCPInboundErrors.
+			l.server.metric.TCPToVsockErrors.
 				WithLabelValues(metrics.TCPErrorDial).Inc()
 			l.server.logger.Warn("inbound tcp dial failed",
 				"remote", remoteAddr,
@@ -75,12 +75,12 @@ func (l *listener) handleTCP(ctx context.Context, c net.Conn) {
 
 	upBytes, downBytes, copyErrored := shuttleTCP(c, upstream)
 
-	l.server.metric.TCPInboundBytes.
+	l.server.metric.TCPToVsockBytes.
 		WithLabelValues(metrics.DirectionUp).Add(float64(upBytes))
-	l.server.metric.TCPInboundBytes.
+	l.server.metric.TCPToVsockBytes.
 		WithLabelValues(metrics.DirectionDown).Add(float64(downBytes))
 	if copyErrored {
-		l.server.metric.TCPInboundErrors.
+		l.server.metric.TCPToVsockErrors.
 			WithLabelValues(metrics.TCPErrorCopy).Inc()
 	}
 

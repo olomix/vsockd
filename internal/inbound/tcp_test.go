@@ -581,16 +581,16 @@ func TestInboundTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	}
 	_ = client.Close()
 
-	waitForPlainCounter(t, m.TCPInboundConnections, 1)
-	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+	waitForPlainCounter(t, m.TCPToVsockConnections, 1)
+	waitForCounter(t, m.TCPToVsockBytes, float64(len(payload)),
 		metrics.DirectionUp)
-	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+	waitForCounter(t, m.TCPToVsockBytes, float64(len(payload)),
 		metrics.DirectionDown)
 
-	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorDial); got != 0 {
+	if got := counterValue(t, m.TCPToVsockErrors, metrics.TCPErrorDial); got != 0 {
 		t.Errorf("dial error counter = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorCopy); got != 0 {
+	if got := counterValue(t, m.TCPToVsockErrors, metrics.TCPErrorCopy); got != 0 {
 		t.Errorf("copy error counter = %v, want 0", got)
 	}
 }
@@ -622,13 +622,13 @@ func TestInboundTCP_Passthrough_MetricsDialFail(t *testing.T) {
 	_, _ = client.Read(buf)
 	_ = client.Close()
 
-	waitForPlainCounter(t, m.TCPInboundConnections, 1)
-	waitForCounter(t, m.TCPInboundErrors, 1, metrics.TCPErrorDial)
+	waitForPlainCounter(t, m.TCPToVsockConnections, 1)
+	waitForCounter(t, m.TCPToVsockErrors, 1, metrics.TCPErrorDial)
 
-	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionUp); got != 0 {
+	if got := counterValue(t, m.TCPToVsockBytes, metrics.DirectionUp); got != 0 {
 		t.Errorf("DirectionUp bytes = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionDown); got != 0 {
+	if got := counterValue(t, m.TCPToVsockBytes, metrics.DirectionDown); got != 0 {
 		t.Errorf("DirectionDown bytes = %v, want 0", got)
 	}
 }

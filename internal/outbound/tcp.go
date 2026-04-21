@@ -47,7 +47,7 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 	peerPort := c.PeerPort()
 	listenPort := l.port
 
-	l.server.metric.TCPOutboundConnections.Inc()
+	l.server.metric.VsockToTCPConnections.Inc()
 	l.server.logger.Debug("inbound vsock connection",
 		"cid", peerCID,
 		"port", peerPort,
@@ -64,7 +64,7 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 		// warn-level log so shutdown does not look like an incident.
 		shutdownCancel := l.server.dialCtx.Err() != nil
 		if !shutdownCancel {
-			l.server.metric.TCPOutboundErrors.
+			l.server.metric.VsockToTCPErrors.
 				WithLabelValues(metrics.TCPErrorDial).Inc()
 			l.server.logger.Warn("outbound tcp dial failed",
 				"cid", peerCID,
@@ -86,12 +86,12 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 
 	upBytes, downBytes, copyErrored := shuttleTCP(c, upstream)
 
-	l.server.metric.TCPOutboundBytes.
+	l.server.metric.VsockToTCPBytes.
 		WithLabelValues(metrics.DirectionUp).Add(float64(upBytes))
-	l.server.metric.TCPOutboundBytes.
+	l.server.metric.VsockToTCPBytes.
 		WithLabelValues(metrics.DirectionDown).Add(float64(downBytes))
 	if copyErrored {
-		l.server.metric.TCPOutboundErrors.
+		l.server.metric.VsockToTCPErrors.
 			WithLabelValues(metrics.TCPErrorCopy).Inc()
 	}
 

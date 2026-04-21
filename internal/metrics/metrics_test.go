@@ -26,14 +26,14 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.OutboundConnections.WithLabelValues("16", OutboundResultAllowed).Inc()
 	m.OutboundConnections.WithLabelValues("16", OutboundResultDenied).Inc()
 	m.OutboundBytes.WithLabelValues("16", DirectionIn).Add(5)
-	m.TCPInboundConnections.Inc()
-	m.TCPInboundBytes.WithLabelValues(DirectionUp).Add(1)
-	m.TCPInboundBytes.WithLabelValues(DirectionDown).Add(2)
-	m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
-	m.TCPOutboundConnections.Inc()
-	m.TCPOutboundBytes.WithLabelValues(DirectionUp).Add(3)
-	m.TCPOutboundBytes.WithLabelValues(DirectionDown).Add(4)
-	m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+	m.TCPToVsockConnections.Inc()
+	m.TCPToVsockBytes.WithLabelValues(DirectionUp).Add(1)
+	m.TCPToVsockBytes.WithLabelValues(DirectionDown).Add(2)
+	m.TCPToVsockErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.VsockToTCPConnections.Inc()
+	m.VsockToTCPBytes.WithLabelValues(DirectionUp).Add(3)
+	m.VsockToTCPBytes.WithLabelValues(DirectionDown).Add(4)
+	m.VsockToTCPErrors.WithLabelValues(TCPErrorCopy).Inc()
 	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
 
 	body := scrape(t, m.Handler())
@@ -44,12 +44,12 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"inbound_errors_total",
 		"outbound_connections_total",
 		"outbound_bytes_total",
-		"tcp_inbound_connections_total",
-		"tcp_inbound_bytes_total",
-		"tcp_inbound_errors_total",
-		"tcp_outbound_connections_total",
-		"tcp_outbound_bytes_total",
-		"tcp_outbound_errors_total",
+		"tcp_to_vsock_connections_total",
+		"tcp_to_vsock_bytes_total",
+		"tcp_to_vsock_errors_total",
+		"vsock_to_tcp_connections_total",
+		"vsock_to_tcp_bytes_total",
+		"vsock_to_tcp_errors_total",
 		"config_reloads_total",
 	}
 	for _, name := range want {
@@ -107,16 +107,16 @@ func TestLabelCardinalityBounded(t *testing.T) {
 	// after hundreds of events the series count must still be bounded by
 	// the fixed label set, not grow with traffic.
 	for i := 0; i < 500; i++ {
-		m.TCPInboundConnections.Inc()
-		m.TCPInboundBytes.WithLabelValues(DirectionUp).Inc()
-		m.TCPInboundBytes.WithLabelValues(DirectionDown).Inc()
-		m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
-		m.TCPInboundErrors.WithLabelValues(TCPErrorCopy).Inc()
-		m.TCPOutboundConnections.Inc()
-		m.TCPOutboundBytes.WithLabelValues(DirectionUp).Inc()
-		m.TCPOutboundBytes.WithLabelValues(DirectionDown).Inc()
-		m.TCPOutboundErrors.WithLabelValues(TCPErrorDial).Inc()
-		m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+		m.TCPToVsockConnections.Inc()
+		m.TCPToVsockBytes.WithLabelValues(DirectionUp).Inc()
+		m.TCPToVsockBytes.WithLabelValues(DirectionDown).Inc()
+		m.TCPToVsockErrors.WithLabelValues(TCPErrorDial).Inc()
+		m.TCPToVsockErrors.WithLabelValues(TCPErrorCopy).Inc()
+		m.VsockToTCPConnections.Inc()
+		m.VsockToTCPBytes.WithLabelValues(DirectionUp).Inc()
+		m.VsockToTCPBytes.WithLabelValues(DirectionDown).Inc()
+		m.VsockToTCPErrors.WithLabelValues(TCPErrorDial).Inc()
+		m.VsockToTCPErrors.WithLabelValues(TCPErrorCopy).Inc()
 	}
 	m.ConfigReloads.WithLabelValues(ReloadResultSuccess).Inc()
 	m.ConfigReloads.WithLabelValues(ReloadResultFailure).Inc()
@@ -131,10 +131,10 @@ func TestLabelCardinalityBounded(t *testing.T) {
 		{"inbound_errors_total", m.InboundErrors, 1},
 		{"outbound_connections_total", m.OutboundConnections, 3},
 		{"outbound_bytes_total", m.OutboundBytes, 2},
-		{"tcp_inbound_bytes_total", m.TCPInboundBytes, 2},
-		{"tcp_inbound_errors_total", m.TCPInboundErrors, 2},
-		{"tcp_outbound_bytes_total", m.TCPOutboundBytes, 2},
-		{"tcp_outbound_errors_total", m.TCPOutboundErrors, 2},
+		{"tcp_to_vsock_bytes_total", m.TCPToVsockBytes, 2},
+		{"tcp_to_vsock_errors_total", m.TCPToVsockErrors, 2},
+		{"vsock_to_tcp_bytes_total", m.VsockToTCPBytes, 2},
+		{"vsock_to_tcp_errors_total", m.VsockToTCPErrors, 2},
 		{"config_reloads_total", m.ConfigReloads, 2},
 	}
 	for _, tc := range vecCases {
@@ -148,8 +148,8 @@ func TestLabelCardinalityBounded(t *testing.T) {
 		name string
 		c    prometheus.Counter
 	}{
-		{"tcp_inbound_connections_total", m.TCPInboundConnections},
-		{"tcp_outbound_connections_total", m.TCPOutboundConnections},
+		{"tcp_to_vsock_connections_total", m.TCPToVsockConnections},
+		{"vsock_to_tcp_connections_total", m.VsockToTCPConnections},
 	}
 	for _, tc := range plainCases {
 		if got := collectorSeriesCount(t, tc.c); got != 1 {
@@ -165,30 +165,30 @@ func TestLabelCardinalityBounded(t *testing.T) {
 func TestTCPLabelValuesFixed(t *testing.T) {
 	m := New()
 
-	m.TCPInboundConnections.Inc()
-	m.TCPInboundBytes.WithLabelValues(DirectionUp).Inc()
-	m.TCPInboundBytes.WithLabelValues(DirectionDown).Inc()
-	m.TCPInboundErrors.WithLabelValues(TCPErrorDial).Inc()
-	m.TCPInboundErrors.WithLabelValues(TCPErrorCopy).Inc()
-	m.TCPOutboundConnections.Inc()
-	m.TCPOutboundBytes.WithLabelValues(DirectionUp).Inc()
-	m.TCPOutboundBytes.WithLabelValues(DirectionDown).Inc()
-	m.TCPOutboundErrors.WithLabelValues(TCPErrorDial).Inc()
-	m.TCPOutboundErrors.WithLabelValues(TCPErrorCopy).Inc()
+	m.TCPToVsockConnections.Inc()
+	m.TCPToVsockBytes.WithLabelValues(DirectionUp).Inc()
+	m.TCPToVsockBytes.WithLabelValues(DirectionDown).Inc()
+	m.TCPToVsockErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.TCPToVsockErrors.WithLabelValues(TCPErrorCopy).Inc()
+	m.VsockToTCPConnections.Inc()
+	m.VsockToTCPBytes.WithLabelValues(DirectionUp).Inc()
+	m.VsockToTCPBytes.WithLabelValues(DirectionDown).Inc()
+	m.VsockToTCPErrors.WithLabelValues(TCPErrorDial).Inc()
+	m.VsockToTCPErrors.WithLabelValues(TCPErrorCopy).Inc()
 
 	body := scrape(t, m.Handler())
 
 	wantLines := []string{
-		`tcp_inbound_connections_total 1`,
-		`tcp_inbound_bytes_total{direction="up"} 1`,
-		`tcp_inbound_bytes_total{direction="down"} 1`,
-		`tcp_inbound_errors_total{reason="dial_fail"} 1`,
-		`tcp_inbound_errors_total{reason="copy_error"} 1`,
-		`tcp_outbound_connections_total 1`,
-		`tcp_outbound_bytes_total{direction="up"} 1`,
-		`tcp_outbound_bytes_total{direction="down"} 1`,
-		`tcp_outbound_errors_total{reason="dial_fail"} 1`,
-		`tcp_outbound_errors_total{reason="copy_error"} 1`,
+		`tcp_to_vsock_connections_total 1`,
+		`tcp_to_vsock_bytes_total{direction="up"} 1`,
+		`tcp_to_vsock_bytes_total{direction="down"} 1`,
+		`tcp_to_vsock_errors_total{reason="dial_fail"} 1`,
+		`tcp_to_vsock_errors_total{reason="copy_error"} 1`,
+		`vsock_to_tcp_connections_total 1`,
+		`vsock_to_tcp_bytes_total{direction="up"} 1`,
+		`vsock_to_tcp_bytes_total{direction="down"} 1`,
+		`vsock_to_tcp_errors_total{reason="dial_fail"} 1`,
+		`vsock_to_tcp_errors_total{reason="copy_error"} 1`,
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(body, line) {

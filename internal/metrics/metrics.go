@@ -70,12 +70,12 @@ type Metrics struct {
 	// direction ∈ {up, down}, reason ∈ {dial_fail, copy_error}. No
 	// per-connection identifiers leak into label values, so cardinality is
 	// constant regardless of traffic patterns.
-	TCPInboundConnections  prometheus.Counter
-	TCPInboundBytes        *prometheus.CounterVec
-	TCPInboundErrors       *prometheus.CounterVec
-	TCPOutboundConnections prometheus.Counter
-	TCPOutboundBytes       *prometheus.CounterVec
-	TCPOutboundErrors      *prometheus.CounterVec
+	TCPToVsockConnections prometheus.Counter
+	TCPToVsockBytes       *prometheus.CounterVec
+	TCPToVsockErrors      *prometheus.CounterVec
+	VsockToTCPConnections prometheus.Counter
+	VsockToTCPBytes       *prometheus.CounterVec
+	VsockToTCPErrors      *prometheus.CounterVec
 
 	ConfigReloads *prometheus.CounterVec
 }
@@ -120,43 +120,43 @@ func New() *Metrics {
 			},
 			[]string{"cid", "direction"},
 		),
-		TCPInboundConnections: prometheus.NewCounter(
+		TCPToVsockConnections: prometheus.NewCounter(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_connections_total",
-				Help: "TCP connections accepted on mode=tcp inbound listeners.",
+				Name: "tcp_to_vsock_connections_total",
+				Help: "TCP connections accepted on tcp_to_vsock listeners.",
 			},
 		),
-		TCPInboundBytes: prometheus.NewCounterVec(
+		TCPToVsockBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_bytes_total",
-				Help: "Bytes proxied on mode=tcp inbound connections, by direction.",
+				Name: "tcp_to_vsock_bytes_total",
+				Help: "Bytes proxied on tcp_to_vsock connections, by direction.",
 			},
 			[]string{"direction"},
 		),
-		TCPInboundErrors: prometheus.NewCounterVec(
+		TCPToVsockErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_errors_total",
-				Help: "Errors on mode=tcp inbound connections, by reason.",
+				Name: "tcp_to_vsock_errors_total",
+				Help: "Errors on tcp_to_vsock connections, by reason.",
 			},
 			[]string{"reason"},
 		),
-		TCPOutboundConnections: prometheus.NewCounter(
+		VsockToTCPConnections: prometheus.NewCounter(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_connections_total",
-				Help: "vsock connections accepted on mode=tcp outbound listeners.",
+				Name: "vsock_to_tcp_connections_total",
+				Help: "vsock connections accepted on vsock_to_tcp listeners.",
 			},
 		),
-		TCPOutboundBytes: prometheus.NewCounterVec(
+		VsockToTCPBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_bytes_total",
-				Help: "Bytes proxied on mode=tcp outbound connections, by direction.",
+				Name: "vsock_to_tcp_bytes_total",
+				Help: "Bytes proxied on vsock_to_tcp connections, by direction.",
 			},
 			[]string{"direction"},
 		),
-		TCPOutboundErrors: prometheus.NewCounterVec(
+		VsockToTCPErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_errors_total",
-				Help: "Errors on mode=tcp outbound connections, by reason.",
+				Name: "vsock_to_tcp_errors_total",
+				Help: "Errors on vsock_to_tcp connections, by reason.",
 			},
 			[]string{"reason"},
 		),
@@ -175,12 +175,12 @@ func New() *Metrics {
 		m.InboundErrors,
 		m.OutboundConnections,
 		m.OutboundBytes,
-		m.TCPInboundConnections,
-		m.TCPInboundBytes,
-		m.TCPInboundErrors,
-		m.TCPOutboundConnections,
-		m.TCPOutboundBytes,
-		m.TCPOutboundErrors,
+		m.TCPToVsockConnections,
+		m.TCPToVsockBytes,
+		m.TCPToVsockErrors,
+		m.VsockToTCPConnections,
+		m.VsockToTCPBytes,
+		m.VsockToTCPErrors,
 		m.ConfigReloads,
 	)
 	return m

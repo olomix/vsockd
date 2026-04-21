@@ -327,18 +327,19 @@ Struct field renames: `TCPInboundConnections` → `TCPToVsockConnections`,
 etc. Help strings updated to say "tcp_to_vsock listeners" / "vsock_to_tcp
 listeners" instead of "mode=tcp inbound" / "mode=tcp outbound".
 
-- [ ] in `internal/metrics/metrics.go`: rename the six `CounterOpts.Name`
+- [x] in `internal/metrics/metrics.go`: rename the six `CounterOpts.Name`
       values and their `Help` text
-- [ ] in `internal/metrics/metrics.go`: rename the six struct fields
+- [x] in `internal/metrics/metrics.go`: rename the six struct fields
       on `Metrics`; update the `MustRegister` call site
-- [ ] grep the tree for the old field names and update every caller
+- [x] grep the tree for the old field names and update every caller
       (chiefly in `internal/inbound/tcp.go` and `internal/outbound/tcp.go`)
-- [ ] update `internal/metrics/metrics_test.go` assertions for new
+- [x] update `internal/metrics/metrics_test.go` assertions for new
       metric names
-- [ ] update any integration test that scrapes `/metrics` and asserts
+- [x] update any integration test that scrapes `/metrics` and asserts
       a metric name (search `test/e2e/e2e_test.go` for `tcp_inbound_`
-      / `tcp_outbound_` string literals)
-- [ ] run full test suite — must pass before Task 3
+      / `tcp_outbound_` string literals) — no matches in e2e; the
+      `internal/{inbound,outbound}/tcp_test.go` files were updated
+- [x] run full test suite — must pass before Task 3
 
 ### Task 3: Metrics config — disable-by-default and `vsock_port`
 
