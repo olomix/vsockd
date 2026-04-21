@@ -762,3 +762,59 @@ func TestInboundTCP_DialCancelledByShutdown(t *testing.T) {
 	}
 }
 
+// TestInboundTCP_ApplyTargetChangeReturnsClearError verifies that SIGHUP
+// reloading an inbound mode=tcp listener with a different target_cid or
+// target_port on the same bind:port is rejected with a descriptive
+// "restart required" error rather than silently dropping the edit — the
+// atomic target fields are never updated by CommitApply today, so
+// accepting the reload would leave traffic flowing to the previous
+// enclave while config_reloads_total{result="success"} ticks up.
+func TestInboundTCP_ApplyTargetChangeReturnsClearError(t *testing.T) {
+	port := func() int {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		p := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		return p
+	}()
+
+	m := metrics.New()
+	cfg := []config.InboundListener{{
+		Bind:       "127.0.0.1",
+		Port:       port,
+		Mode:       config.ModeTCP,
+		TargetCID:  16,
+		TargetPort: 1,
+	}}
+	s := startServer(t, cfg, vsockconn.NewLoopbackDialer(
+		vsockconn.NewRegistry(), 2), m)
+
+	updated := []config.InboundListener{{
+		Bind:       "127.0.0.1",
+		Port:       port,
+		Mode:       config.ModeTCP,
+		TargetCID:  16,
+		TargetPort: 2, // port change only
+	}}
+	err := s.Apply(updated)
+	if err == nil {
+		t.Fatal("Apply with changed target_port returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "restart required") {
+		t.Fatalf("Apply error = %q; want mention of restart required",
+			err.Error())
+	}
+
+	// Running listener must keep its original target.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.listeners) != 1 {
+		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
+	}
+	if got := s.listeners[0].targetPort.Load(); got != 1 {
+		t.Fatalf("targetPort = %d; want original 1 preserved", got)
+	}
+}
+

@@ -219,6 +219,22 @@ func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error)
 		}
 		k := newLn.key()
 		if cur, ok := existing[k]; ok {
+			// For mode=tcp listeners there is no in-place swap of the vsock
+			// target today: handleTCP reads cur.targetCID/targetPort, which
+			// CommitApply never updates. Silently ignoring a target_cid /
+			// target_port edit would leave operators believing the reload
+			// took effect while traffic keeps flowing to the old enclave,
+			// so reject the reload loudly instead — mirroring the
+			// mode-change guard a few lines below.
+			if newLn.cfg.Mode == config.ModeTCP {
+				if cur.targetCID.Load() != newLn.cfg.TargetCID ||
+					cur.targetPort.Load() != newLn.cfg.TargetPort {
+					cleanup()
+					return nil, fmt.Errorf(
+						"inbound[%d]: cannot change target_cid/target_port on %s at runtime; restart required",
+						i, newLn.addr())
+				}
+			}
 			// Key covers Bind, Port, and Mode — the only cfg fields the
 			// handle path reads — so we only need to swap the routes map.
 			// Leaving cur.cfg alone avoids a data race with accept-loop
@@ -378,8 +394,10 @@ type listener struct {
 	// listeners. Atomic types keep concurrent handleTCP reads race-free
 	// and leave room to introduce an in-place target swap the same way
 	// the outbound side swaps upstream — today a SIGHUP that changes
-	// target_cid or target_port on an already-bound inbound listener
-	// requires a restart. Unused for http-host/tls-sni listeners.
+	// target_cid or target_port on an already-bound inbound listener is
+	// rejected with a "restart required" error by PrepareApply, so these
+	// values never change for the lifetime of the listener.
+	// Unused for http-host/tls-sni listeners.
 	targetCID  atomic.Uint32
 	targetPort atomic.Uint32
 }

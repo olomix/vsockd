@@ -213,9 +213,13 @@ outbound:
     upstream: 10.0.0.5:5432
 ```
 
-TCP listeners participate in the same SIGHUP reload (upstream / target
-swaps are applied atomically) and the same `shutdown_grace` drain as the
-HTTP listeners.
+TCP listeners participate in the same SIGHUP reload and the same
+`shutdown_grace` drain as the HTTP listeners. Outbound `upstream` is
+swapped atomically (new connections use the new upstream, existing ones
+drain on the old one); inbound `target_cid` / `target_port` cannot change
+at runtime — a reload that tries to edit them on an already-bound port is
+rejected with a "restart required" error, and the running listener keeps
+forwarding to the original target.
 
 ### Debug logging
 
@@ -340,9 +344,9 @@ are ever used as label values.
   the same port atomically picks up a new `upstream` — new connections see
   the new rules or upstream, in-flight connections keep the values they
   started with. Changing the `mode` on an already-bound bind:port (inbound)
-  or vsock port (outbound) is rejected (restart required), and changing
-  `target_cid` / `target_port` on an existing inbound `mode: tcp` listener
-  also requires a restart today.
+  or vsock port (outbound) is rejected with a "restart required" error, and
+  changing `target_cid` / `target_port` on an existing inbound `mode: tcp`
+  listener is rejected the same way.
   A failed reload is logged, `config_reloads_total{result="failure"}`
   increments, and the running config is left untouched.
 - **Graceful shutdown.** On `SIGTERM` / `SIGINT` vsockd stops accepting new
