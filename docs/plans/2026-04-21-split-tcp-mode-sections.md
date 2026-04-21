@@ -456,14 +456,17 @@ work identically whether vsockd runs on the host or inside the enclave.
 Add a commented-out `metrics.vsock_port` alternative alongside the
 existing `metrics.bind` example so the enclave-side pattern is visible.
 
-- [ ] rewrite `examples/vsockd.yaml` per the new schema
-- [ ] add a commented-out `metrics.vsock_port` example alongside
+- [x] rewrite `examples/vsockd.yaml` per the new schema — already
+      reflected the new schema from Task 1; no additional rewrite
+      needed in this task
+- [x] add a commented-out `metrics.vsock_port` example alongside
       `metrics.bind`, with a one-line explanation of when to use
       which
-- [ ] verify the example parses cleanly: `go run ./cmd/vsockd -config
-      examples/vsockd.yaml -version` (config load happens before the
-      version-only exit)
-- [ ] run full test suite — must pass before Task 6
+- [x] verify the example parses cleanly — `-version` short-circuits
+      before `config.Load` in the current main.go, so instead relied
+      on `TestLoadExample` in `internal/config/config_test.go` which
+      runs `config.Load("../../examples/vsockd.yaml")`
+- [x] run full test suite — must pass before Task 6
 
 ### Task 6: Rewrite README to drop host-only framing
 

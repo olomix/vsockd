@@ -73,8 +73,14 @@ vsock_to_tcp:
   - port: 9000
     upstream: 10.0.0.5:5432
 
+# Prometheus /metrics endpoint. Disabled by default — omit this section
+# (or pass -metrics-addr "") to leave the endpoint off. Use `bind` on the
+# parent host to serve over TCP, or `vsock_port` inside the enclave so the
+# parent host can scrape over vsock. `bind` and `vsock_port` are mutually
+# exclusive.
 metrics:
   bind: 0.0.0.0:9090
+  # vsock_port: 9090
 
 # Maximum time to wait for in-flight connections to drain on SIGTERM.
 shutdown_grace: 30s
