@@ -1,6 +1,13 @@
-// Package inbound implements the host-side TCP listeners that sniff a
-// hostname out of the first bytes of a connection and forward the raw stream
-// (including those first bytes) to an enclave's vsock endpoint.
+// Package inbound implements the host-side TCP listeners that forward
+// incoming connections to enclave vsock endpoints.
+//
+// Listeners run in one of three modes:
+//
+//   - http-host sniffs the HTTP Host header and routes by hostname.
+//   - tls-sni sniffs the TLS ClientHello SNI extension and forwards the
+//     original bytes untouched (the enclave owns the certificate).
+//   - tcp (mode: tcp) pipes bytes bidirectionally to a fixed enclave
+//     (cid, vsock_port) with no application-layer parsing.
 package inbound
 
 import (

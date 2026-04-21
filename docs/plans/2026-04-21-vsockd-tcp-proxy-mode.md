@@ -289,13 +289,15 @@ backward-compatible.
 
 ### Task 8: [Final] Update documentation
 
-- [ ] update `examples/vsockd.yaml` with commented examples for
+- [x] update `examples/vsockd.yaml` with commented examples for
   `inbound mode: tcp` and `outbound mode: tcp`, and `log_level: debug`
-- [ ] update `README.md` with a short "TCP passthrough mode" section:
+- [x] update `README.md` with a short "TCP passthrough mode" section:
   config example, the debug log line format, and the three ways to
   toggle debug
-- [ ] confirm no inbound/outbound schema notes elsewhere (in
-  `docs/` or package doc comments) have gone stale
+- [x] confirm no inbound/outbound schema notes elsewhere (in
+  `docs/` or package doc comments) have gone stale (refreshed package
+  doc comments in `internal/inbound/sni.go` and
+  `internal/outbound/server.go` to mention the new `mode: tcp` variant)
 
 *Note: ralphex automatically moves completed plans to
 `docs/plans/completed/`*

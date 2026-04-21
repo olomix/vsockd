@@ -1,13 +1,19 @@
-// Package outbound implements the vsock-facing forward HTTP proxy used by
-// enclaves to reach external destinations.
+// Package outbound implements the vsock-facing proxy used by enclaves to
+// reach external destinations.
 //
-// Each configured outbound port listens on vsock. Every accepted connection
-// is authorized by peer CID before any bytes are read; unauthorized peers
-// are dropped and counted as "denied". Authorized peers get exactly one
-// HTTP request parsed — CONNECT (HTTPS tunnel) or absolute-URI GET/POST
-// (plain HTTP) — whose destination is matched against that CID's egress
-// allowlist. Allow → dial TCP, proxy the request/tunnel. Deny → 403 and
-// close.
+// Each configured outbound port listens on vsock and runs in one of two
+// modes:
+//
+//   - HTTP forward proxy (legacy, mode unset). Every accepted connection
+//     is authorized by peer CID before any bytes are read; unauthorized
+//     peers are dropped and counted as "denied". Authorized peers get
+//     exactly one HTTP request parsed — CONNECT (HTTPS tunnel) or
+//     absolute-URI GET/POST (plain HTTP) — whose destination is matched
+//     against that CID's egress allowlist. Allow → dial TCP, proxy the
+//     request/tunnel. Deny → 403 and close.
+//   - TCP passthrough (mode: tcp). Accepted vsock connections are piped
+//     bidirectionally to a fixed upstream host:port. No HTTP parsing, no
+//     per-CID allowlist.
 package outbound
 
 import (
