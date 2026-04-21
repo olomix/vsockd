@@ -1,0 +1,88 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" \
+            -o "dist/vsockd-linux-${GOARCH}" ./cmd/vsockd
+
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum "vsockd-linux-${{ matrix.goarch }}" > "vsockd-linux-${{ matrix.goarch }}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vsockd-linux-${{ matrix.goarch }}
+          path: dist/vsockd-linux-${{ matrix.goarch }}*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Publish rolling nightly release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nightly
+          name: Nightly build
+          prerelease: true
+          make_latest: 'false'
+          body: |
+            Rolling nightly build.
+
+            - Commit: ${{ github.sha }}
+            - Built: ${{ github.event.repository.updated_at }}
+            - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: |
+            dist/vsockd-linux-amd64
+            dist/vsockd-linux-amd64.sha256
+            dist/vsockd-linux-arm64
+            dist/vsockd-linux-arm64.sha256
