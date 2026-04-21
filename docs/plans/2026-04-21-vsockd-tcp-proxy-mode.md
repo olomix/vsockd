@@ -243,7 +243,7 @@ backward-compatible.
 
 ### Task 6: E2E coverage for TCP passthrough in both directions
 
-- [ ] extend `test/e2e/e2e_test.go` with a scenario:
+- [x] extend `test/e2e/e2e_test.go` with a scenario:
   - spin up a fake enclave TCP-echo server on loopback vsock
   - spin up a local TCP echo on `127.0.0.1`
   - write a YAML config with one `inbound mode: tcp` listener and one
@@ -253,15 +253,17 @@ backward-compatible.
     listener to the enclave echo
   - verify an enclave vsock client can round-trip bytes through the
     outbound listener to the TCP echo
-- [ ] enable debug log level in this test and capture the handler
+- [x] enable debug log level in this test and capture the handler
   output; assert one `inbound vsock connection` / `vsock connection
   closed` pair per outbound connection, and one `inbound tcp
   connection` / `tcp connection closed` pair per inbound connection,
   with correct byte totals
-- [ ] add a SIGHUP reload sub-case: reload config that changes the
+- [x] add a SIGHUP reload sub-case: reload config that changes the
   TCP upstream address; verify new connections use the new upstream
-  while existing ones drain
-- [ ] run `go test -race ./test/e2e/...` — must pass before next task
+  while existing ones drain (required extending outbound `ApplyPlan` to
+  also swap the atomic upstream pointer on kept-by-port mode=tcp
+  listeners)
+- [x] run `go test -race ./test/e2e/...` — must pass before next task
 
 ### Task 7: Verify acceptance criteria
 

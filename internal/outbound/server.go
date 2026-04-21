@@ -179,6 +179,12 @@ type ApplyPlan struct {
 type applySwap struct {
 	listener *listener
 	matchers map[uint32]*allowlist.Matcher
+	// upstream is populated only when both the existing and new configs
+	// declare mode: tcp on the same port; it then carries the reload's new
+	// upstream host:port so CommitApply can atomically swap it without
+	// tearing down the accept loop. In-flight connections keep using the
+	// upstream they already dialed; new accepts pick up the replacement.
+	upstream *string
 }
 
 // PrepareApply validates the new outbound configuration, binds any newly
@@ -218,8 +224,14 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 		}
 		if cur, ok := existing[cfg.Port]; ok {
 			// Port alone keys the listener; updating cur.cfg would race
-			// with the accept-loop reader. Swap only the matcher table.
-			swaps = append(swaps, applySwap{cur, newLn.matchersSnapshot()})
+			// with the accept-loop reader. Swap only the mutable state
+			// (matcher table for HTTP mode, upstream for TCP mode).
+			sw := applySwap{listener: cur, matchers: newLn.matchersSnapshot()}
+			if cfg.Mode == config.ModeTCP && cur.cfg.Mode == config.ModeTCP {
+				u := newLn.upstreamSnapshot()
+				sw.upstream = &u
+			}
+			swaps = append(swaps, sw)
 			kept[cfg.Port] = true
 			next = append(next, cur)
 			continue
@@ -254,6 +266,9 @@ func (p *ApplyPlan) CommitApply() {
 
 	for _, sw := range p.swaps {
 		sw.listener.replaceMatchers(sw.matchers)
+		if sw.upstream != nil {
+			sw.listener.replaceUpstream(*sw.upstream)
+		}
 	}
 	for _, ln := range p.newBinds {
 		s.wg.Add(1)
@@ -409,6 +424,14 @@ func (l *listener) upstreamSnapshot() string {
 		return ""
 	}
 	return *p
+}
+
+// replaceUpstream atomically swaps the live TCP upstream host:port so a
+// reload changing just the upstream of an existing mode: tcp listener
+// takes effect on the next accepted connection, without tearing down the
+// accept loop.
+func (l *listener) replaceUpstream(u string) {
+	l.upstream.Store(&u)
 }
 
 func (l *listener) bind() error {
