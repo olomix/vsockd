@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -312,6 +313,146 @@ shutdown_grace: 2s
 	if c, err := net.DialTimeout("tcp", oldAddr, 200*time.Millisecond); err == nil {
 		_ = c.Close()
 		t.Fatalf("old listener still accepting after SIGHUP")
+	}
+}
+
+// TestResolveLogLevelPrecedence covers the flag > env > yaml > info chain
+// and the invalid-env-var error case.
+func TestResolveLogLevelPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		debug   bool
+		env     string
+		cfg     string
+		want    slog.Level
+		wantErr bool
+	}{
+		{name: "default info", want: slog.LevelInfo},
+		{name: "yaml debug", cfg: "debug", want: slog.LevelDebug},
+		{name: "yaml info explicit", cfg: "info", want: slog.LevelInfo},
+		{name: "env debug beats yaml info",
+			env: "debug", cfg: "info", want: slog.LevelDebug},
+		{name: "env info beats yaml debug",
+			env: "info", cfg: "debug", want: slog.LevelInfo},
+		{name: "flag beats env info and yaml info",
+			debug: true, env: "info", cfg: "info", want: slog.LevelDebug},
+		{name: "flag beats yaml debug",
+			debug: true, cfg: "debug", want: slog.LevelDebug},
+		{name: "invalid env var errors",
+			env: "verbose", wantErr: true},
+		{name: "empty env falls through to yaml debug",
+			env: "", cfg: "debug", want: slog.LevelDebug},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveLogLevel(tc.debug, tc.env, tc.cfg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (level=%s)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("level = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDebugFlagEnablesDebugLogging runs the real binary with -debug and
+// asserts the startup log line reports level=DEBUG. Exercises the wiring
+// end-to-end (flag → resolver → handler) in one subprocess invocation.
+func TestDebugFlagEnablesDebugLogging(t *testing.T) {
+	inPort := allocPort(t)
+	metricsPort := allocPort(t)
+	cfg := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	cfgPath := writeConfigFile(t, cfg)
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", metricsPort)
+
+	cmd := exec.Command(os.Args[0],
+		"-config", cfgPath,
+		"-metrics-addr", metricsAddr,
+		"-log-format", "json",
+		"-debug",
+	)
+	cmd.Env = append(os.Environ(),
+		"VSOCKD_TEST_SUBPROCESS=1",
+		"VSOCKD_BACKEND=loopback",
+	)
+	stderr := &syncBuffer{}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start vsockd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", inPort)
+	if err := waitForListen(addr, 3*time.Second); err != nil {
+		t.Fatalf("listener never bound: %v\nstderr: %s",
+			err, stderr.String())
+	}
+
+	if !waitForLog(stderr, `"log_level":"DEBUG"`, 2*time.Second) {
+		t.Fatalf("expected log_level=DEBUG in stderr, got:\n%s",
+			stderr.String())
+	}
+}
+
+// TestLogLevelEnvVarInvalidIsFatal asserts that an unrecognised
+// VSOCKD_LOG_LEVEL value aborts startup with a non-zero exit code.
+func TestLogLevelEnvVarInvalidIsFatal(t *testing.T) {
+	inPort := allocPort(t)
+	metricsPort := allocPort(t)
+	cfg := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	cfgPath := writeConfigFile(t, cfg)
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", metricsPort)
+
+	cmd := exec.Command(os.Args[0],
+		"-config", cfgPath,
+		"-metrics-addr", metricsAddr,
+	)
+	cmd.Env = append(os.Environ(),
+		"VSOCKD_TEST_SUBPROCESS=1",
+		"VSOCKD_BACKEND=loopback",
+		"VSOCKD_LOG_LEVEL=verbose",
+	)
+	var errBuf bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got success")
+	}
+	if !strings.Contains(errBuf.String(), "VSOCKD_LOG_LEVEL") {
+		t.Fatalf("expected error mentioning VSOCKD_LOG_LEVEL, got:\n%s",
+			errBuf.String())
 	}
 }
 

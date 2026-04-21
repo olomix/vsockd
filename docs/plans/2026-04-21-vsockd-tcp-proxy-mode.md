@@ -151,18 +151,18 @@ backward-compatible.
 
 ### Task 2: Wire dynamic log level (`-debug` flag, `VSOCKD_LOG_LEVEL`, yaml `log_level`)
 
-- [ ] in `cmd/vsockd/main.go`: add `-debug` bool flag (default false)
-- [ ] resolve effective log level with precedence: `-debug` flag →
+- [x] in `cmd/vsockd/main.go`: add `-debug` bool flag (default false)
+- [x] resolve effective log level with precedence: `-debug` flag →
   `VSOCKD_LOG_LEVEL` env var → YAML `log_level` → default `info`
-- [ ] build handler using a `slog.LevelVar` so the level is fixed at
+- [x] build handler using a `slog.LevelVar` so the level is fixed at
   start (no runtime flip needed, but the var pattern keeps all
   handlers consistent)
-- [ ] log the resolved log level at startup at Info so it is visible in
+- [x] log the resolved log level at startup at Info so it is visible in
   production
-- [ ] add `main_test.go` (or a helper-level test in a new
+- [x] add `main_test.go` (or a helper-level test in a new
   `internal/logging` package if extraction is clean) covering the
   precedence chain — pure function, no network
-- [ ] run `go test ./...` — must pass before next task
+- [x] run `go test ./...` — must pass before next task
 
 ### Task 3: Implement TCP outbound handler (vsock → TCP upstream)
 
