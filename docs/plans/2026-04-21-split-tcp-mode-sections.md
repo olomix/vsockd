@@ -479,45 +479,45 @@ passthrough features work symmetrically on either side.
 
 Specific edits:
 
-- [ ] in `README.md` intro (lines 1–7): rewrite the first paragraph so
+- [x] in `README.md` intro (lines 1–7): rewrite the first paragraph so
       the binary is described as running "on the parent EC2 host or
       inside the enclave, depending on which features you use"; keep
       the second sentence that calls out the host-role fan-out + CID
       egress allowlist, since that is still accurate but narrower
-- [ ] in `README.md` "What it does" (lines 8–26): keep
+- [x] in `README.md` "What it does" (lines 8–26): keep
       inbound/outbound bullets (they're still right for HTTP-aware
       features); replace the "Raw TCP passthrough (`mode: tcp`)" bullet
       with two new bullets for `tcp_to_vsock` and `vsock_to_tcp`,
       each explicitly noting the symmetric host/enclave use case
-- [ ] in `README.md` Architecture (lines 31–62): update the ASCII
+- [x] in `README.md` Architecture (lines 31–62): update the ASCII
       diagram so the four flavors are grouped by section (not by
       host-role direction); add a short "Inside the enclave" note
       pointing out that `tcp_to_vsock` / `vsock_to_tcp` are the only
       flavors that work from an enclave-local vsockd
-- [ ] in `README.md` Configuration example (lines 140–168): update
+- [x] in `README.md` Configuration example (lines 140–168): update
       the minimal YAML shape to match the new schema
-- [ ] in `README.md` "TCP passthrough mode" (lines 191–265): rename
+- [x] in `README.md` "TCP passthrough mode" (lines 191–265): rename
       the section to something like "TCP passthrough
       (`tcp_to_vsock` / `vsock_to_tcp`)"; update the YAML examples;
       rename the subsection title "Vsock-side (outbound `mode: tcp`)"
       to "`vsock_to_tcp` debug logs" and similarly for the TCP side;
       update the log message examples to match Task 3
-- [ ] in `README.md` "Enclave-side socat recipe" (lines 266–307):
+- [x] in `README.md` "Enclave-side socat recipe" (lines 266–307):
       keep the socat recipe (it's still the simplest option for the
       HTTP forward-proxy case), but add a new subsection immediately
       before or after it showing the equivalent `tcp_to_vsock` /
       `vsock_to_tcp` in-enclave vsockd configuration, and explicitly
       note that a second copy of vsockd inside the enclave can
       replace the socat stub entirely
-- [ ] in `README.md` Metrics table (lines 315–327): update the six
+- [x] in `README.md` Metrics table (lines 315–327): update the six
       renamed metric names and their descriptions
-- [ ] in `README.md` Operational notes — SIGHUP reload (lines 339–351):
+- [x] in `README.md` Operational notes — SIGHUP reload (lines 339–351):
       update the wording so it says "listeners in `tcp_to_vsock`
       cannot change `vsock_cid` / `vsock_port` at runtime" and
       "`vsock_to_tcp` listeners atomically swap `upstream`" instead
       of the current "outbound mode: tcp" / "inbound mode: tcp"
       language
-- [ ] in `README.md` Metrics section (lines 309–336): rewrite the
+- [x] in `README.md` Metrics section (lines 309–336): rewrite the
       opening paragraph to make three things explicit: (1) metrics are
       **disabled by default** now and must be opted into via
       `metrics.bind`, `metrics.vsock_port`, or `-metrics-addr`; (2)
@@ -525,13 +525,14 @@ Specific edits:
       serves over vsock from `VMADDR_CID_ANY` and is the enclave-side
       form when you want the parent host to scrape. Show both YAML
       shapes side-by-side
-- [ ] in `README.md` command-line flags section (lines 178–189):
+- [x] in `README.md` command-line flags section (lines 178–189):
       update the `-metrics-addr` entry to reflect the new empty
       default, and note that an explicit empty string `-metrics-addr
       ""` is no longer needed to disable
-- [ ] run `markdownlint README.md` if it's configured; otherwise
-      skim manually for broken links
-- [ ] no test run needed for this task, but run `go test ./...` at
+- [x] run `markdownlint README.md` if it's configured; otherwise
+      skim manually for broken links — `markdownlint` not installed;
+      manual review completed
+- [x] no test run needed for this task, but run `go test ./...` at
       the end to confirm nothing regressed — must pass before Task 7
 
 ### Task 7: Update CHANGELOG

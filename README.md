@@ -1,9 +1,13 @@
 # vsockd
 
-`vsockd` is a single static Go binary that runs on the parent EC2 host of AWS
-Nitro Enclaves and bridges network traffic in both directions over vsock. One
-daemon can front multiple enclaves sharing the same inbound ports and enforce
-a per-CID outbound egress allowlist.
+`vsockd` is a single static Go binary that bridges network traffic between TCP
+and `AF_VSOCK`. It runs on the parent EC2 host of AWS Nitro Enclaves or inside
+the enclave itself, depending on which features you use: the HTTP-aware
+features (SNI/Host fan-out, forward-proxy with per-CID allowlists) are
+host-role-specific, while the raw-TCP passthrough features (`tcp_to_vsock` /
+`vsock_to_tcp`) work symmetrically on either side. On the host, one daemon
+can front multiple enclaves sharing the same inbound ports and enforce a
+per-CID outbound egress allowlist.
 
 ## What it does
 
@@ -18,11 +22,16 @@ a per-CID outbound egress allowlist.
   HTTPS, absolute-URI `GET`/`POST` for HTTP), so an app inside the enclave
   can simply set `HTTP_PROXY` and `HTTPS_PROXY`. Each request is checked
   against a per-(port, CID) allowlist before any upstream dial.
-- **Raw TCP passthrough (`mode: tcp`).** Both directions also support a
-  `mode: tcp` listener variant that forwards bytes without any
-  application-layer parsing — no HTTP Host, no TLS SNI, no allowlist. Use
-  it for databases, gRPC, or any non-HTTP protocol that needs to cross
-  the enclave boundary.
+- **Raw TCP → vsock (`tcp_to_vsock`).** Listens on a TCP port and pipes
+  raw bytes to a fixed vsock endpoint — no HTTP Host, no TLS SNI, no
+  allowlist. Works symmetrically: on the host it carries external TCP
+  into an enclave; inside the enclave it carries local TCP to the parent
+  host's vsock. Use it for databases, gRPC, or any non-HTTP protocol.
+- **Raw vsock → TCP (`vsock_to_tcp`).** The mirror image: listens on a
+  vsock port and pipes raw bytes to a fixed TCP upstream. On the host
+  that means enclave vsock out to an external TCP service; inside the
+  enclave it lets an enclave-local vsockd forward to a TCP service on the
+  parent host. Also no application-layer parsing.
 
 Multiple enclaves may share the same inbound host port under distinct
 hostnames. The same CID may NOT appear under more than one outbound port —
@@ -30,36 +39,47 @@ this is enforced at config-load time.
 
 ## Architecture
 
+The four listener flavors are grouped by config section. `inbound` and
+`outbound` are HTTP-aware and host-only; `tcp_to_vsock` and `vsock_to_tcp`
+are raw-byte pipes that work on either side of the vsock boundary.
+
 ```
-                                            parent EC2 host
+                                            vsockd (host or enclave)
                                     ┌────────────────────────────────┐
                                     │                                │
-  external client ── TCP 443 ─────▶ │  inbound listener              │
+  external client ── TCP 443 ─────▶ │  inbound (host only)           │
   (TLS ClientHello w/ SNI)          │   └─ sniff SNI                 │
                                     │   └─ lookup hostname → CID     │ ── vsock(CID, port) ──▶ enclave
                                     │   └─ dial vsock                │
                                     │   └─ replay ClientHello + copy │
                                     │                                │
-  external client ── TCP ────────▶  │  inbound mode: tcp             │
-  (any protocol)                    │   └─ no sniff, no routing      │ ── vsock(target_cid,   ─▶ enclave
-                                    │   └─ dial fixed vsock target   │      target_port)
-                                    │   └─ raw byte pipe             │
-                                    │                                │
-  external service ◀── TCP ──────── │  outbound listener             │
+  external service ◀── TCP ──────── │  outbound (host only)          │
   (e.g. api.stripe.com:443)         │   └─ accept vsock, read peer CID
                                     │   └─ CID in port's CID set?    │ ◀── vsock(port) ─────── enclave
                                     │   └─ read HTTP request         │     (CONNECT/GET/POST)
                                     │   └─ allowlist(host:port)?     │
                                     │   └─ dial + stream             │
                                     │                                │
-  external service ◀── TCP ──────── │  outbound mode: tcp            │
+  TCP client ── TCP ──────────────▶ │  tcp_to_vsock (host or enclave)│
+  (any protocol)                    │   └─ no sniff, no routing      │ ── vsock(vsock_cid,    ─▶ peer
+                                    │   └─ dial fixed vsock target   │      vsock_port)
+                                    │   └─ raw byte pipe             │
+                                    │                                │
+  TCP upstream ◀── TCP ──────────── │  vsock_to_tcp (host or enclave)│
   (any protocol, fixed upstream)    │   └─ no HTTP parse, no allowlist
-                                    │   └─ dial fixed upstream       │ ◀── vsock(port) ─────── enclave
+                                    │   └─ dial fixed upstream       │ ◀── vsock(port) ─────── peer
                                     │   └─ raw byte pipe             │      (raw bytes)
                                     │                                │
-                                    │  /metrics (Prometheus)         │
+                                    │  /metrics (Prometheus, TCP or  │
+                                    │             vsock — optional)  │
                                     └────────────────────────────────┘
 ```
+
+Inside the enclave, only `tcp_to_vsock` and `vsock_to_tcp` apply — the
+HTTP-aware `inbound` / `outbound` sections depend on host-role vsock
+addressing and CID-based routing that are meaningless enclave-side.
+An enclave-local vsockd with just those two sections can replace the
+classic `socat` stub entirely (see below).
 
 ## Install
 
@@ -87,9 +107,12 @@ docker run --rm --network host \
 ```
 
 The image is built on `gcr.io/distroless/static-debian12:nonroot` and
-contains only the vsockd binary. The image `EXPOSE`s port 9090 for
-`/metrics`; add `-p 9090:9090` (or change the listen address) when not
-running with `--network host`.
+contains only the vsockd binary. The image `EXPOSE`s port 9090 as the
+conventional `/metrics` port; if you opt in to TCP metrics by setting
+`metrics.bind: 0.0.0.0:9090` (or pass `-metrics-addr :9090`), add
+`-p 9090:9090` when not running with `--network host`. Metrics are
+disabled unless you set one of `metrics.bind`, `metrics.vsock_port`, or
+the `-metrics-addr` flag.
 
 ### systemd unit
 
@@ -160,8 +183,22 @@ outbound:
         allowed_hosts:
           - "*.internal.example.com:443"
 
+# Raw TCP → vsock: listens on bind:port, forwards bytes to (vsock_cid,
+# vsock_port). Works on host or inside the enclave.
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 5432
+    vsock_cid: 16
+    vsock_port: 5432
+
+# Raw vsock → TCP: listens on vsock port, forwards bytes to upstream.
+vsock_to_tcp:
+  - port: 9000
+    upstream: 10.0.0.5:5432
+
 metrics:
-  bind: 0.0.0.0:9090
+  bind: 0.0.0.0:9090         # TCP form (host side)
+  # vsock_port: 9090         # vsock form (enclave side) — mutually exclusive
 
 shutdown_grace: 30s
 log_format: json             # json | text | auto
@@ -178,8 +215,11 @@ Allowlist pattern syntax:
 Command-line flags:
 
 - `-config PATH` — path to the YAML config. Default `/etc/vsockd/vsockd.yaml`.
-- `-metrics-addr ADDR` — Prometheus listen address. Default `:9090`. An
-  explicit flag overrides `metrics.bind` from the YAML.
+- `-metrics-addr ADDR` — TCP listen address for the Prometheus `/metrics`
+  endpoint. Default is empty (no listener). An explicit non-empty value
+  overrides `metrics.bind` / `metrics.vsock_port` from the YAML. Leave
+  both the flag and the YAML `metrics` section unset to disable the
+  endpoint entirely.
 - `-log-format FORMAT` — `json`, `text`, or `auto`. Overrides the YAML.
   `auto` picks `text` when stderr is a TTY and `json` otherwise.
 - `-debug` — force the log level to `debug`. Equivalent to setting
@@ -187,39 +227,40 @@ Command-line flags:
   precedence over both.
 - `-version` — print the version and exit.
 
-## TCP passthrough mode
+## TCP passthrough (`tcp_to_vsock` / `vsock_to_tcp`)
 
-Both inbound and outbound listeners accept a `mode: tcp` variant that
-forwards raw bytes in both directions without touching the application
-layer. No HTTP Host header, no TLS SNI, no allowlist. Use it for non-HTTP
-protocols — Postgres, MySQL, gRPC, Redis, SSH, anything.
+Two top-level config sections forward raw bytes in both directions without
+touching the application layer — no HTTP Host header, no TLS SNI, no
+allowlist. Use them for non-HTTP protocols (Postgres, MySQL, gRPC, Redis,
+SSH, anything) and for running vsockd *inside* the enclave, where the
+HTTP-aware `inbound` / `outbound` sections don't apply.
 
 ```yaml
-inbound:
-  # TCP → vsock: accept TCP on bind:port and shuttle bytes to a fixed
-  # enclave (cid, vsock_port).
+# TCP → vsock: accept TCP on bind:port and shuttle bytes to a fixed
+# (vsock_cid, vsock_port). Works on the host (external TCP → enclave)
+# or inside the enclave (local TCP → parent host vsock).
+tcp_to_vsock:
   - bind: 0.0.0.0
     port: 5432
-    mode: tcp
-    target_cid: 16
-    target_port: 5432
+    vsock_cid: 16
+    vsock_port: 5432
 
-outbound:
-  # vsock → TCP: accept vsock on this port and shuttle bytes to a fixed
-  # upstream host:port. No per-CID allowlist; any enclave that can
-  # connect reaches the upstream.
+# vsock → TCP: accept vsock on this port and shuttle bytes to a fixed
+# upstream host:port. No per-CID allowlist; any peer CID that connects
+# reaches the upstream. Works on the host (enclave vsock → external TCP)
+# or inside the enclave (host vsock → local TCP).
+vsock_to_tcp:
   - port: 9000
-    mode: tcp
     upstream: 10.0.0.5:5432
 ```
 
-TCP listeners participate in the same SIGHUP reload and the same
-`shutdown_grace` drain as the HTTP listeners. Outbound `upstream` is
-swapped atomically (new connections use the new upstream, existing ones
-drain on the old one); inbound `target_cid` / `target_port` cannot change
-at runtime — a reload that tries to edit them on an already-bound port is
-rejected with a "restart required" error, and the running listener keeps
-forwarding to the original target.
+Both listener types participate in the same SIGHUP reload and the same
+`shutdown_grace` drain as the HTTP listeners. `vsock_to_tcp` `upstream`
+is swapped atomically (new connections use the new upstream, existing
+ones drain on the old one); `tcp_to_vsock` `vsock_cid` / `vsock_port`
+cannot change at runtime — a reload that tries to edit them on an
+already-bound TCP port is rejected with a "restart required" error, and
+the running listener keeps forwarding to the original target.
 
 ### Debug logging
 
@@ -228,29 +269,29 @@ connection on open and close. Byte totals are reported on close. The
 shapes below show the message and the structured attrs; the actual
 wire format depends on `-log-format` (JSON by default, text for a TTY).
 
-Vsock-side (outbound `mode: tcp`), attrs: `cid`, `port`, `listen_port`,
+`vsock_to_tcp` debug logs, attrs: `cid`, `port`, `listen_port`,
 `total_bytes` (on close only):
 
 ```
-level=DEBUG msg="inbound vsock connection" cid=3 port=1234 listen_port=9000
-level=DEBUG msg="vsock connection closed"  cid=3 port=1234 listen_port=9000 total_bytes=12345
+level=DEBUG msg="vsock_to_tcp connection opened" cid=3 port=1234 listen_port=9000
+level=DEBUG msg="vsock_to_tcp connection closed" cid=3 port=1234 listen_port=9000 total_bytes=12345
 ```
 
-TCP-side (inbound `mode: tcp`), attrs: `remote`, `listen`, `total_bytes`
+`tcp_to_vsock` debug logs, attrs: `remote`, `listen`, `total_bytes`
 (on close only):
 
 ```
-level=DEBUG msg="inbound tcp connection" remote=192.168.1.10:54321 listen=0.0.0.0:5432
-level=DEBUG msg="tcp connection closed"  remote=192.168.1.10:54321 listen=0.0.0.0:5432 total_bytes=12345
+level=DEBUG msg="tcp_to_vsock connection opened" remote=192.168.1.10:54321 listen=0.0.0.0:5432
+level=DEBUG msg="tcp_to_vsock connection closed" remote=192.168.1.10:54321 listen=0.0.0.0:5432 total_bytes=12345
 ```
 
 Upstream dial failures are logged at `WARN` independent of the debug
-setting, so alerts keyed on level pick them up. Outbound attrs:
-`cid`, `port`, `listen_port`, `upstream`, `err`. Inbound attrs:
-`remote`, `listen`, `target_cid`, `target_port`, `err`. Dials
-cancelled by `Shutdown` during graceful teardown do not emit the warn
-line or increment `tcp_*_errors_total{reason=dial_fail}` — they are
-expected shutdown artefacts rather than upstream faults.
+setting, so alerts keyed on level pick them up. `vsock_to_tcp` attrs:
+`cid`, `port`, `listen_port`, `upstream`, `err`. `tcp_to_vsock` attrs:
+`remote`, `listen`, `target_cid`, `target_port`, `err`. Dials cancelled
+by `Shutdown` during graceful teardown do not emit the warn line or
+increment `{tcp_to_vsock,vsock_to_tcp}_errors_total{reason=dial_fail}` —
+they are expected shutdown artefacts rather than upstream faults.
 
 Three ways to toggle debug, in order of precedence:
 
@@ -306,11 +347,63 @@ the enclave process listening on `AF_VSOCK` at the `(cid, vsock_port)` the
 host-side route points to — e.g. a Node.js server bound to vsock port 8443
 for HTTPS or 8080 for HTTP. No socat stub is needed inbound.
 
+### Running a second vsockd inside the enclave
+
+Instead of `socat`, a second copy of vsockd running inside the enclave can
+bridge local TCP to the parent host's vsock forward-proxy. This gives you
+the same SIGHUP reload, `shutdown_grace` drain, Prometheus metrics, and
+structured logging that the host-side daemon has — without pulling in
+`socat`. Use `tcp_to_vsock` to target the Nitro parent at CID 3:
+
+```yaml
+# vsockd.yaml inside the enclave
+tcp_to_vsock:
+  - bind: 127.0.0.1
+    port: 3128
+    vsock_cid: 3              # parent host
+    vsock_port: 8080          # host-side outbound forward-proxy port
+
+metrics:
+  vsock_port: 9090            # let the parent host scrape /metrics over vsock
+```
+
+Enclave workloads then set `HTTP_PROXY=http://127.0.0.1:3128` as usual and
+their requests flow through the enclave-local vsockd, across vsock to the
+host-side vsockd, and out to the approved upstream. The mirror direction
+(anything the enclave needs to accept from the host over a non-HTTP
+protocol) uses `vsock_to_tcp` in the enclave's config.
+
 ## Metrics
 
-vsockd exposes Prometheus metrics at `/metrics` on the address configured by
-`metrics.bind` (or the `-metrics-addr` flag). All series use a private
+vsockd exposes Prometheus metrics at `/metrics`. The endpoint is
+**disabled by default** — metrics start only if at least one of the
+following is set: `metrics.bind` in YAML, `metrics.vsock_port` in YAML,
+or a non-empty `-metrics-addr` flag. Omit all three to disable entirely;
+the startup log will say `metrics=disabled`. All series use a private
 registry — there is no global Prometheus state.
+
+Two transports are supported, mutually exclusive:
+
+- **TCP (`metrics.bind`)** — the host-side form. Serves `/metrics` on a
+  TCP `host:port`. Scrape from Prometheus as usual.
+- **vsock (`metrics.vsock_port`)** — the enclave-side form. Listens on
+  `AF_VSOCK` bound to `VMADDR_CID_ANY` on the given port so the parent
+  host can scrape `/metrics` over vsock. No CID is set on the listener
+  — if you need to restrict which peer CID can scrape, put that control
+  in front of vsockd rather than inside it.
+
+```yaml
+# Host-side
+metrics:
+  bind: 0.0.0.0:9090
+
+# Enclave-side (mutually exclusive with bind)
+metrics:
+  vsock_port: 9090
+```
+
+An explicit non-empty `-metrics-addr` flag overrides both YAML fields
+and forces the TCP transport.
 
 | Metric | Labels | Description |
 |---|---|---|
@@ -319,12 +412,12 @@ registry — there is no global Prometheus state.
 | `inbound_errors_total` | `route`, `kind` | Inbound errors by kind: `sniff`, `route`, `dial`, `copy`, `accept`. |
 | `outbound_connections_total` | `cid`, `result` | vsock accepts on outbound listeners; `result` is `allowed`, `denied`, or `error`. |
 | `outbound_bytes_total` | `cid`, `direction` | Bytes proxied outbound, by CID and direction. |
-| `tcp_inbound_connections_total` | — | TCP connections accepted on `mode: tcp` inbound listeners. |
-| `tcp_inbound_bytes_total` | `direction` | Bytes proxied by TCP inbound listeners; `direction` is `up` or `down`. |
-| `tcp_inbound_errors_total` | `reason` | TCP inbound errors; `reason` is `dial_fail` or `copy_error`. |
-| `tcp_outbound_connections_total` | — | vsock connections accepted on `mode: tcp` outbound listeners. |
-| `tcp_outbound_bytes_total` | `direction` | Bytes proxied by TCP outbound listeners; `direction` is `up` or `down`. |
-| `tcp_outbound_errors_total` | `reason` | TCP outbound errors; `reason` is `dial_fail` or `copy_error`. |
+| `tcp_to_vsock_connections_total` | — | TCP connections accepted on `tcp_to_vsock` listeners. |
+| `tcp_to_vsock_bytes_total` | `direction` | Bytes proxied on `tcp_to_vsock` connections; `direction` is `up` or `down`. |
+| `tcp_to_vsock_errors_total` | `reason` | `tcp_to_vsock` errors; `reason` is `dial_fail` or `copy_error`. |
+| `vsock_to_tcp_connections_total` | — | vsock connections accepted on `vsock_to_tcp` listeners. |
+| `vsock_to_tcp_bytes_total` | `direction` | Bytes proxied on `vsock_to_tcp` connections; `direction` is `up` or `down`. |
+| `vsock_to_tcp_errors_total` | `reason` | `vsock_to_tcp` errors; `reason` is `dial_fail` or `copy_error`. |
 | `config_reloads_total` | `result` | SIGHUP reload attempts; `result` is `success` or `failure`. |
 
 Label cardinality is bounded by the config. `route` is the hostname from the
@@ -340,15 +433,18 @@ are ever used as label values.
   against the running set. Listeners whose `(bind, port)` disappeared are
   closed (existing connections continue until they end naturally). New
   listeners are started. Listeners whose bind:port is unchanged swap their
-  route/CID tables atomically, and an outbound `mode: tcp` listener kept at
-  the same port atomically picks up a new `upstream` — new connections see
-  the new rules or upstream, in-flight connections keep the values they
-  started with. Changing the `mode` on an already-bound bind:port (inbound)
-  or vsock port (outbound) is rejected with a "restart required" error, and
-  changing `target_cid` / `target_port` on an existing inbound `mode: tcp`
-  listener is rejected the same way.
-  A failed reload is logged, `config_reloads_total{result="failure"}`
-  increments, and the running config is left untouched.
+  route/CID tables atomically, and a `vsock_to_tcp` listener kept at the
+  same vsock port atomically picks up a new `upstream` — new connections
+  see the new rules or upstream, in-flight connections keep the values
+  they started with. Listeners in `tcp_to_vsock` cannot change `vsock_cid`
+  / `vsock_port` at runtime: a reload that edits them on an already-bound
+  bind:port is rejected with a "restart required" error, and the running
+  listener keeps forwarding to the original target. Changing the `mode`
+  on an already-bound `inbound` bind:port or moving an `outbound` vsock
+  port between the HTTP forward-proxy and the `vsock_to_tcp` section is
+  rejected the same way. A failed reload is logged,
+  `config_reloads_total{result="failure"}` increments, and the running
+  config is left untouched.
 - **Graceful shutdown.** On `SIGTERM` / `SIGINT` vsockd stops accepting new
   connections, waits up to `shutdown_grace` (default 30s) for active
   connections to drain, then force-closes the rest. A second signal is not
