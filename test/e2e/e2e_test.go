@@ -841,26 +841,26 @@ shutdown_grace: 2s
 	// emitted asynchronously from the handler goroutine so a short
 	// settle window is needed.
 	recs := waitForCount(t, capH, map[string]int{
-		"inbound tcp connection":    inboundConns,
-		"tcp connection closed":     inboundConns,
-		"inbound vsock connection":  outboundConns,
-		"vsock connection closed":   outboundConns,
+		"tcp_to_vsock connection opened": inboundConns,
+		"tcp_to_vsock connection closed": inboundConns,
+		"vsock_to_tcp connection opened": outboundConns,
+		"vsock_to_tcp connection closed": outboundConns,
 	}, 3*time.Second)
 
-	if got := countMessage(recs, "inbound tcp connection"); got != inboundConns {
-		t.Errorf("inbound tcp connection count = %d, want %d",
+	if got := countMessage(recs, "tcp_to_vsock connection opened"); got != inboundConns {
+		t.Errorf("tcp_to_vsock connection opened count = %d, want %d",
 			got, inboundConns)
 	}
-	if got := countMessage(recs, "tcp connection closed"); got != inboundConns {
-		t.Errorf("tcp connection closed count = %d, want %d",
+	if got := countMessage(recs, "tcp_to_vsock connection closed"); got != inboundConns {
+		t.Errorf("tcp_to_vsock connection closed count = %d, want %d",
 			got, inboundConns)
 	}
-	if got := countMessage(recs, "inbound vsock connection"); got != outboundConns {
-		t.Errorf("inbound vsock connection count = %d, want %d",
+	if got := countMessage(recs, "vsock_to_tcp connection opened"); got != outboundConns {
+		t.Errorf("vsock_to_tcp connection opened count = %d, want %d",
 			got, outboundConns)
 	}
-	if got := countMessage(recs, "vsock connection closed"); got != outboundConns {
-		t.Errorf("vsock connection closed count = %d, want %d",
+	if got := countMessage(recs, "vsock_to_tcp connection closed"); got != outboundConns {
+		t.Errorf("vsock_to_tcp connection closed count = %d, want %d",
 			got, outboundConns)
 	}
 
@@ -890,12 +890,12 @@ shutdown_grace: 2s
 			t.Errorf("no %q record had total_bytes > 0", msg)
 		}
 	}
-	assertPositiveTotal("tcp connection closed")
-	assertPositiveTotal("vsock connection closed")
+	assertPositiveTotal("tcp_to_vsock connection closed")
+	assertPositiveTotal("vsock_to_tcp connection closed")
 
 	// Spot-check a representative close log for the vsock side carries
 	// a plausible CID (enclaveCID from the dialer).
-	if rec := findMessage(recs, "vsock connection closed"); rec != nil {
+	if rec := findMessage(recs, "vsock_to_tcp connection closed"); rec != nil {
 		if got := rec["cid"]; got != float64(enclaveCID) {
 			t.Errorf("vsock close cid = %v, want %v", got, enclaveCID)
 		}

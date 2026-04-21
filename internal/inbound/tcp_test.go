@@ -207,7 +207,7 @@ func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 	var closeLog logRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		closeLog = findMessage(capH.records(t), "tcp connection closed")
+		closeLog = findMessage(capH.records(t), "tcp_to_vsock connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -230,7 +230,7 @@ func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 		t.Errorf("remote attr missing or wrong type: %v", closeLog["remote"])
 	}
 
-	openLog := findMessage(capH.records(t), "inbound tcp connection")
+	openLog := findMessage(capH.records(t), "tcp_to_vsock connection opened")
 	if openLog == nil {
 		t.Fatalf("open log not emitted")
 	}
@@ -284,15 +284,15 @@ func TestInboundTCP_Passthrough_DialFailure(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		recs := capH.records(t)
-		failLog = findMessage(recs, "inbound tcp dial failed")
-		closeLog = findMessage(recs, "tcp connection closed")
+		failLog = findMessage(recs, "tcp_to_vsock dial failed")
+		closeLog = findMessage(recs, "tcp_to_vsock connection closed")
 		if failLog != nil && closeLog != nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if failLog == nil {
-		t.Fatalf("expected 'inbound tcp dial failed' log")
+		t.Fatalf("expected 'tcp_to_vsock dial failed' log")
 	}
 	if got := failLog["target_cid"]; got != float64(enclaveCID) {
 		t.Errorf("target_cid attr = %v, want %v", got, enclaveCID)
@@ -301,7 +301,7 @@ func TestInboundTCP_Passthrough_DialFailure(t *testing.T) {
 		t.Errorf("target_port attr = %v, want %v", got, vsockPort)
 	}
 	if closeLog == nil {
-		t.Fatalf("expected 'tcp connection closed' log even on dial fail")
+		t.Fatalf("expected 'tcp_to_vsock connection closed' log even on dial fail")
 	}
 	if got := closeLog["total_bytes"]; got != float64(0) {
 		t.Errorf("total_bytes on dial fail = %v, want 0", got)
@@ -386,7 +386,7 @@ func TestInboundTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	var closeLog logRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		closeLog = findMessage(capH.records(t), "tcp connection closed")
+		closeLog = findMessage(capH.records(t), "tcp_to_vsock connection closed")
 		if closeLog != nil {
 			break
 		}

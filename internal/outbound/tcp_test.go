@@ -176,7 +176,7 @@ func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		closeLog = findMessage(
-			capH.records(t), "vsock connection closed")
+			capH.records(t), "vsock_to_tcp connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -199,7 +199,7 @@ func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 		t.Errorf("cid = %v, want %v", got, enclaveCID)
 	}
 
-	openLog := findMessage(capH.records(t), "inbound vsock connection")
+	openLog := findMessage(capH.records(t), "vsock_to_tcp connection opened")
 	if openLog == nil {
 		t.Fatalf("open log not emitted")
 	}
@@ -258,21 +258,21 @@ func TestTCP_Passthrough_DialFailure(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		recs := capH.records(t)
-		failLog = findMessage(recs, "outbound tcp dial failed")
-		closeLog = findMessage(recs, "vsock connection closed")
+		failLog = findMessage(recs, "vsock_to_tcp dial failed")
+		closeLog = findMessage(recs, "vsock_to_tcp connection closed")
 		if failLog != nil && closeLog != nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if failLog == nil {
-		t.Fatalf("expected 'outbound tcp dial failed' log")
+		t.Fatalf("expected 'vsock_to_tcp dial failed' log")
 	}
 	if got := failLog["upstream"]; got != deadAddr {
 		t.Errorf("upstream attr = %v, want %v", got, deadAddr)
 	}
 	if closeLog == nil {
-		t.Fatalf("expected 'vsock connection closed' log even on dial fail")
+		t.Fatalf("expected 'vsock_to_tcp connection closed' log even on dial fail")
 	}
 	// No bytes transferred → total_bytes must be zero.
 	if got := closeLog["total_bytes"]; got != float64(0) {
@@ -360,7 +360,7 @@ func TestTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		closeLog = findMessage(
-			capH.records(t), "vsock connection closed")
+			capH.records(t), "vsock_to_tcp connection closed")
 		if closeLog != nil {
 			break
 		}

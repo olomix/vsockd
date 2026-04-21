@@ -438,14 +438,14 @@ Structured attributes keep their current names (`cid`, `port`,
 `listen_port`, `remote`, `listen`, `total_bytes`). Warn-level dial
 failure logs get the same treatment.
 
-- [ ] in `internal/inbound/tcp.go`: rename debug and warn log messages
+- [x] in `internal/inbound/tcp.go`: rename debug and warn log messages
       for the tcp-to-vsock path
-- [ ] in `internal/outbound/tcp.go`: rename debug and warn log messages
+- [x] in `internal/outbound/tcp.go`: rename debug and warn log messages
       for the vsock-to-tcp path
-- [ ] update any test that asserts on log message text (search
+- [x] update any test that asserts on log message text (search
       `internal/inbound/tcp_test.go`, `internal/outbound/tcp_test.go`,
       and `test/e2e/e2e_test.go` for the old strings)
-- [ ] run full test suite — must pass before Task 5
+- [x] run full test suite — must pass before Task 5
 
 ### Task 5: Update examples/vsockd.yaml
 

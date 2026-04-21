@@ -48,7 +48,7 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 	listenPort := l.port
 
 	l.server.metric.VsockToTCPConnections.Inc()
-	l.server.logger.Debug("inbound vsock connection",
+	l.server.logger.Debug("vsock_to_tcp connection opened",
 		"cid", peerCID,
 		"port", peerPort,
 		"listen_port", listenPort)
@@ -66,14 +66,14 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 		if !shutdownCancel {
 			l.server.metric.VsockToTCPErrors.
 				WithLabelValues(metrics.TCPErrorDial).Inc()
-			l.server.logger.Warn("outbound tcp dial failed",
+			l.server.logger.Warn("vsock_to_tcp dial failed",
 				"cid", peerCID,
 				"port", peerPort,
 				"listen_port", listenPort,
 				"upstream", upstreamAddr,
 				"err", err)
 		}
-		l.server.logger.Debug("vsock connection closed",
+		l.server.logger.Debug("vsock_to_tcp connection closed",
 			"cid", peerCID,
 			"port", peerPort,
 			"listen_port", listenPort,
@@ -95,7 +95,7 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 			WithLabelValues(metrics.TCPErrorCopy).Inc()
 	}
 
-	l.server.logger.Debug("vsock connection closed",
+	l.server.logger.Debug("vsock_to_tcp connection closed",
 		"cid", peerCID,
 		"port", peerPort,
 		"listen_port", listenPort,
