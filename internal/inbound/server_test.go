@@ -89,10 +89,15 @@ func fakeEnclave(
 				if rerr != nil && !errors.Is(rerr, io.EOF) {
 					return
 				}
+				// Block on reply with a timeout: a non-blocking select
+				// races with the test goroutine, which may push to reply
+				// after this goroutine has already checked it. Wait long
+				// enough for the test to queue a response. Tests that
+				// want no reply simply never send on the channel.
 				select {
 				case resp := <-reply:
 					_, _ = c.Write(resp)
-				default:
+				case <-time.After(2 * time.Second):
 				}
 			}(c)
 		}
