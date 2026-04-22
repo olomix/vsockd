@@ -339,7 +339,7 @@ outbound:
 		{
 			name: "empty document",
 			yaml: "",
-			want: "no inbound or outbound",
+			want: "no listeners configured",
 		},
 		{
 			name: "unknown log_format",
@@ -369,29 +369,7 @@ metrics:
 			want: "metrics.bind",
 		},
 		{
-			name: "inbound tcp missing target_cid",
-			yaml: `
-inbound:
-  - bind: 0.0.0.0
-    port: 5432
-    mode: tcp
-    target_port: 8080
-`,
-			want: "target_cid",
-		},
-		{
-			name: "inbound tcp missing target_port",
-			yaml: `
-inbound:
-  - bind: 0.0.0.0
-    port: 5432
-    mode: tcp
-    target_cid: 3
-`,
-			want: "target_port",
-		},
-		{
-			name: "inbound tcp with routes",
+			name: "old-style inbound mode: tcp rejected by strict YAML",
 			yaml: `
 inbound:
   - bind: 0.0.0.0
@@ -399,106 +377,188 @@ inbound:
     mode: tcp
     target_cid: 3
     target_port: 8080
-    routes:
-      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
 `,
-			want: "routes not allowed with mode: tcp",
+			want: "field target_cid not found",
 		},
 		{
-			name: "inbound http-host with target_cid",
-			yaml: `
-inbound:
-  - bind: 0.0.0.0
-    port: 80
-    mode: http-host
-    target_cid: 3
-    target_port: 8080
-    routes:
-      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
-`,
-			want: "target_cid/target_port only valid with mode: tcp",
-		},
-		{
-			name: "outbound tcp missing upstream",
+			name: "old-style outbound mode: tcp rejected by strict YAML",
 			yaml: `
 outbound:
   - port: 8080
     mode: tcp
+    upstream: "10.0.0.5:5432"
 `,
-			want: "upstream required",
+			want: "field mode not found",
 		},
 		{
-			name: "outbound tcp invalid upstream (no port)",
+			name: "outbound cids empty",
 			yaml: `
 outbound:
   - port: 8080
-    mode: tcp
+    cids: []
+`,
+			want: "at least one cid required",
+		},
+		{
+			name: "tcp_to_vsock missing bind",
+			yaml: `
+tcp_to_vsock:
+  - port: 5432
+    vsock_cid: 16
+    vsock_port: 5432
+`,
+			want: "bind must not be empty",
+		},
+		{
+			name: "tcp_to_vsock bad port",
+			yaml: `
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 70000
+    vsock_cid: 16
+    vsock_port: 5432
+`,
+			want: "port 70000 out of range",
+		},
+		{
+			name: "tcp_to_vsock vsock_cid below minimum",
+			yaml: `
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 5432
+    vsock_cid: 2
+    vsock_port: 5432
+`,
+			want: "vsock_cid 2 must be >= 3",
+		},
+		{
+			name: "tcp_to_vsock vsock_port zero",
+			yaml: `
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 5432
+    vsock_cid: 16
+    vsock_port: 0
+`,
+			want: "vsock_port 0 out of range",
+		},
+		{
+			name: "vsock_to_tcp port zero",
+			yaml: `
+vsock_to_tcp:
+  - port: 0
+    upstream: "10.0.0.5:5432"
+`,
+			want: "port 0 out of range",
+		},
+		{
+			name: "vsock_to_tcp upstream empty",
+			yaml: `
+vsock_to_tcp:
+  - port: 9000
+    upstream: ""
+`,
+			want: "upstream must not be empty",
+		},
+		{
+			name: "vsock_to_tcp upstream missing port",
+			yaml: `
+vsock_to_tcp:
+  - port: 9000
     upstream: "10.0.0.5"
 `,
 			want: "not host:port",
 		},
 		{
-			name: "outbound tcp invalid upstream port",
+			name: "vsock_to_tcp upstream wildcard",
 			yaml: `
-outbound:
-  - port: 8080
-    mode: tcp
-    upstream: "10.0.0.5:99999"
-`,
-			want: "invalid port",
-		},
-		{
-			name: "outbound tcp empty host in upstream",
-			yaml: `
-outbound:
-  - port: 8080
-    mode: tcp
-    upstream: ":5432"
-`,
-			want: "host must not be empty",
-		},
-		{
-			name: "outbound tcp wildcard in upstream",
-			yaml: `
-outbound:
-  - port: 8080
-    mode: tcp
+vsock_to_tcp:
+  - port: 9000
     upstream: "*.example.com:5432"
 `,
 			want: "wildcards not allowed",
 		},
 		{
-			name: "outbound tcp with cids",
+			name: "cross-section collision inbound vs tcp_to_vsock",
 			yaml: `
-outbound:
-  - port: 8080
-    mode: tcp
-    upstream: "10.0.0.5:5432"
-    cids:
-      - {cid: 3, allowed_hosts: ["*"]}
+inbound:
+  - bind: 0.0.0.0
+    port: 443
+    mode: tls-sni
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8443}
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 443
+    vsock_cid: 16
+    vsock_port: 5432
 `,
-			want: "cids not allowed with mode: tcp",
+			want: "duplicate bind 0.0.0.0:443 already declared in inbound[0]",
 		},
 		{
-			name: "outbound legacy with upstream",
+			name: "cross-section collision outbound vs vsock_to_tcp",
 			yaml: `
 outbound:
-  - port: 8080
-    upstream: "10.0.0.5:5432"
+  - port: 9000
     cids:
-      - {cid: 3, allowed_hosts: ["*"]}
+      - {cid: 16, allowed_hosts: ["*"]}
+vsock_to_tcp:
+  - port: 9000
+    upstream: "10.0.0.5:5432"
 `,
-			want: "upstream only valid with mode: tcp",
+			want: "duplicate port 9000 already declared in outbound[0]",
 		},
 		{
-			name: "outbound unknown mode",
+			name: "metrics bind and vsock_port both set",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  bind: "0.0.0.0:9090"
+  vsock_port: 9090
+`,
+			want: "metrics.bind and metrics.vsock_port are mutually exclusive",
+		},
+		{
+			name: "metrics vsock_port out of range (PortAny)",
+			yaml: `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  vsock_port: 4294967295
+`,
+			want: "metrics.vsock_port 4294967295 out of range",
+		},
+		{
+			name: "metrics vsock_port collides with outbound",
 			yaml: `
 outbound:
-  - port: 8080
-    mode: bogus
-    upstream: "10.0.0.5:5432"
+  - port: 9090
+    cids:
+      - {cid: 16, allowed_hosts: ["*"]}
+metrics:
+  vsock_port: 9090
 `,
-			want: `mode "bogus"`,
+			want: "metrics.vsock_port 9090 already declared in outbound[0]",
+		},
+		{
+			name: "metrics vsock_port collides with vsock_to_tcp",
+			yaml: `
+vsock_to_tcp:
+  - port: 9090
+    upstream: "10.0.0.5:5432"
+metrics:
+  vsock_port: 9090
+`,
+			want: "metrics.vsock_port 9090 already declared in vsock_to_tcp[0]",
 		},
 		{
 			name: "invalid log_level",
@@ -528,23 +588,21 @@ log_level: trace
 	}
 }
 
-// TestLoadTCPMode exercises the mode: tcp variants for both inbound and
-// outbound listeners along with the new log_level field.
-func TestLoadTCPMode(t *testing.T) {
+// TestLoadTCPToVsock verifies the new top-level tcp_to_vsock section
+// round-trips through the schema.
+func TestLoadTCPToVsock(t *testing.T) {
 	yamlDoc := `
 log_level: debug
 
-inbound:
+tcp_to_vsock:
   - bind: 0.0.0.0
     port: 5432
-    mode: tcp
-    target_cid: 3
-    target_port: 8080
-
-outbound:
-  - port: 9000
-    mode: tcp
-    upstream: "10.0.0.5:5432"
+    vsock_cid: 16
+    vsock_port: 5432
+  - bind: 127.0.0.1
+    port: 6379
+    vsock_cid: 17
+    vsock_port: 6379
 `
 	cfg, err := config.Load(writeConfig(t, yamlDoc))
 	if err != nil {
@@ -554,28 +612,93 @@ outbound:
 		t.Fatalf("log_level = %q, want %q",
 			cfg.LogLevel, config.LogLevelDebug)
 	}
-	if len(cfg.Inbound) != 1 || cfg.Inbound[0].Mode != config.ModeTCP {
-		t.Fatalf("inbound[0].Mode = %q, want %q",
-			cfg.Inbound[0].Mode, config.ModeTCP)
+	if len(cfg.TCPToVsock) != 2 {
+		t.Fatalf("want 2 tcp_to_vsock listeners, got %d",
+			len(cfg.TCPToVsock))
 	}
-	if cfg.Inbound[0].TargetCID != 3 {
-		t.Fatalf("inbound[0].TargetCID = %d, want 3",
-			cfg.Inbound[0].TargetCID)
+	if got := cfg.TCPToVsock[0].VsockCID; got != 16 {
+		t.Fatalf("tcp_to_vsock[0].VsockCID = %d, want 16", got)
 	}
-	if cfg.Inbound[0].TargetPort != 8080 {
-		t.Fatalf("inbound[0].TargetPort = %d, want 8080",
-			cfg.Inbound[0].TargetPort)
+	if got := cfg.TCPToVsock[0].VsockPort; got != 5432 {
+		t.Fatalf("tcp_to_vsock[0].VsockPort = %d, want 5432", got)
 	}
-	if len(cfg.Outbound) != 1 || cfg.Outbound[0].Mode != config.ModeTCP {
-		t.Fatalf("outbound[0].Mode = %q, want %q",
-			cfg.Outbound[0].Mode, config.ModeTCP)
+	if got := cfg.TCPToVsock[1].Bind; got != "127.0.0.1" {
+		t.Fatalf("tcp_to_vsock[1].Bind = %q, want 127.0.0.1", got)
 	}
-	if cfg.Outbound[0].Upstream != "10.0.0.5:5432" {
-		t.Fatalf("outbound[0].Upstream = %q", cfg.Outbound[0].Upstream)
+}
+
+// TestLoadVsockToTCP verifies the new top-level vsock_to_tcp section
+// round-trips through the schema.
+func TestLoadVsockToTCP(t *testing.T) {
+	yamlDoc := `
+vsock_to_tcp:
+  - port: 9000
+    upstream: "10.0.0.5:5432"
+  - port: 9001
+    upstream: "db.internal:3306"
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.Outbound[0].CIDs) != 0 {
-		t.Fatalf("outbound[0].CIDs should be empty, got %d",
-			len(cfg.Outbound[0].CIDs))
+	if len(cfg.VsockToTCP) != 2 {
+		t.Fatalf("want 2 vsock_to_tcp listeners, got %d",
+			len(cfg.VsockToTCP))
+	}
+	if got := cfg.VsockToTCP[0].Port; got != 9000 {
+		t.Fatalf("vsock_to_tcp[0].Port = %d, want 9000", got)
+	}
+	if got := cfg.VsockToTCP[0].Upstream; got != "10.0.0.5:5432" {
+		t.Fatalf("vsock_to_tcp[0].Upstream = %q", got)
+	}
+	if got := cfg.VsockToTCP[1].Upstream; got != "db.internal:3306" {
+		t.Fatalf("vsock_to_tcp[1].Upstream = %q", got)
+	}
+}
+
+// TestLoadMetricsVsockPort verifies metrics.vsock_port round-trips through
+// the schema without triggering the mutual-exclusion rule.
+func TestLoadMetricsVsockPort(t *testing.T) {
+	yamlDoc := `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+metrics:
+  vsock_port: 9090
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Metrics.VsockPort; got != 9090 {
+		t.Fatalf("metrics.vsock_port = %d, want 9090", got)
+	}
+	if cfg.Metrics.Bind != "" {
+		t.Fatalf("metrics.bind = %q, want empty", cfg.Metrics.Bind)
+	}
+}
+
+// TestLoadMetricsEmpty verifies that omitting the metrics section leaves
+// both Bind and VsockPort zero-valued — this is the new disable-by-default
+// default.
+func TestLoadMetricsEmpty(t *testing.T) {
+	yamlDoc := `
+inbound:
+  - bind: 0.0.0.0
+    port: 80
+    mode: http-host
+    routes:
+      - {hostname: a.example.com, cid: 3, vsock_port: 8080}
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics.Bind != "" || cfg.Metrics.VsockPort != 0 {
+		t.Fatalf("metrics should be empty by default, got %+v", cfg.Metrics)
 	}
 }
 
@@ -613,6 +736,12 @@ func TestLoadExample(t *testing.T) {
 	}
 	if len(cfg.Outbound) == 0 {
 		t.Fatalf("example should have at least one outbound listener")
+	}
+	if len(cfg.TCPToVsock) == 0 {
+		t.Fatalf("example should have at least one tcp_to_vsock listener")
+	}
+	if len(cfg.VsockToTCP) == 0 {
+		t.Fatalf("example should have at least one vsock_to_tcp listener")
 	}
 }
 

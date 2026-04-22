@@ -258,6 +258,165 @@ shutdown_grace: 2s
 	}
 }
 
+// TestMetricsDisabled starts the app with neither MetricsAddr nor
+// MetricsVsockPort and asserts no /metrics listener is bound.
+func TestMetricsDisabled(t *testing.T) {
+	inPort := allocPort(t)
+	body := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	// startApp passes MetricsAddr="" and does not set MetricsVsockPort.
+	a, _, _ := startApp(t, body, "")
+
+	if ln := a.MetricsListener(); ln != nil {
+		t.Fatalf("MetricsListener() = %v, want nil when disabled",
+			ln.Addr())
+	}
+}
+
+// TestMetricsStartRejectsBothSet asserts the defensive check in
+// App.Start triggers when a direct API caller sets both transports.
+func TestMetricsStartRejectsBothSet(t *testing.T) {
+	dir := t.TempDir()
+	inPort := allocPort(t)
+	cfgPath := writeConfig(t, dir, fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort))
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	_, dialer, listenFn := loopbackBackend(2)
+	a, err := app.New(app.Options{
+		ConfigPath:       cfgPath,
+		Config:           cfg,
+		Logger:           discardLogger(),
+		MetricsAddr:      "127.0.0.1:0",
+		MetricsVsockPort: 9090,
+		VsockDialer:      dialer,
+		VsockListenFn:    listenFn,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err = a.Start(ctx)
+	if err == nil {
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 2*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+		t.Fatal("Start succeeded with both MetricsAddr and "+
+			"MetricsVsockPort set; want error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Start error = %q; want mutually-exclusive mention",
+			err.Error())
+	}
+	// Inbound port must not stay bound after the guard rejects Start.
+	probe, derr := net.DialTimeout("tcp",
+		fmt.Sprintf("127.0.0.1:%d", inPort), 200*time.Millisecond)
+	if derr == nil {
+		probe.Close()
+		t.Fatalf("inbound port %d still accepting after Start failure",
+			inPort)
+	}
+}
+
+// TestMetricsOverVsock starts the app with MetricsVsockPort set and
+// verifies /metrics is scrapable over the loopback vsock backend.
+func TestMetricsOverVsock(t *testing.T) {
+	inPort := allocPort(t)
+	body := fmt.Sprintf(`
+inbound:
+  - bind: 127.0.0.1
+    port: %d
+    mode: http-host
+    routes:
+      - hostname: api.example.com
+        cid: 16
+        vsock_port: 8080
+shutdown_grace: 1s
+`, inPort)
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, body)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	reg, dialer, listenFn := loopbackBackend(2)
+	const metricsVsockPort uint32 = 9090
+	a, err := app.New(app.Options{
+		ConfigPath:       cfgPath,
+		Config:           cfg,
+		Logger:           discardLogger(),
+		MetricsVsockPort: metricsVsockPort,
+		VsockDialer:      dialer,
+		VsockListenFn:    listenFn,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 2*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+	})
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("app.Start: %v", err)
+	}
+
+	// Prime at least one series on a CounterVec so the family shows up.
+	a.Metrics().ConfigReloads.WithLabelValues(metrics.ReloadResultSuccess)
+
+	// Dial /metrics via the loopback backend. Caller CID 2 matches the
+	// loopbackBackend source CID; the vsock listener binds under CID 0.
+	caller := vsockconn.NewLoopbackDialer(reg, 2)
+	c, err := caller.Dial(0, metricsVsockPort)
+	if err != nil {
+		t.Fatalf("dial metrics vsock: %v", err)
+	}
+	defer c.Close()
+
+	req := "GET /metrics HTTP/1.1\r\nHost: scrape\r\n" +
+		"Connection: close\r\n\r\n"
+	if _, err := c.Write([]byte(req)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(buf)
+	if !strings.Contains(text, "200 OK") {
+		t.Fatalf("expected 200 OK, got:\n%s", text)
+	}
+	if !strings.Contains(text, "config_reloads_total") {
+		t.Fatalf("expected config_reloads_total in response:\n%s", text)
+	}
+}
+
 // TestStartReturnsMetricsBindError holds the metrics port, then starts the
 // app configured to bind the same address. Start must surface the bind
 // error; previously net.Listen lived inside the serve goroutine, so bind

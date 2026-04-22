@@ -125,13 +125,13 @@ func startTCPEchoTarget(
 
 func startTCPInboundServer(
 	t *testing.T,
-	listeners []config.InboundListener,
+	listeners []config.TCPToVsockListener,
 	dialer vsockconn.Dialer,
 	m *metrics.Metrics,
 	logger *slog.Logger,
 ) *Server {
 	t.Helper()
-	s, err := NewServer(listeners, dialer, m, logger)
+	s, err := NewServer(nil, listeners, dialer, m, logger)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -149,10 +149,10 @@ func startTCPInboundServer(
 	return s
 }
 
-// TestInboundTCP_Passthrough_RoundTrip verifies a TCP-mode inbound
-// listener shuttles bytes bidirectionally between a TCP peer and the
-// configured vsock target, captures accurate byte totals in the debug
-// close log, and emits the expected open log.
+// TestInboundTCP_Passthrough_RoundTrip verifies a tcp_to_vsock listener
+// shuttles bytes bidirectionally between a TCP peer and the configured
+// vsock target, captures accurate byte totals in the debug close log,
+// and emits the expected open log.
 func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 	reg := vsockconn.NewRegistry()
 	const enclaveCID uint32 = 16
@@ -163,12 +163,11 @@ func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, logger)
@@ -208,7 +207,7 @@ func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 	var closeLog logRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		closeLog = findMessage(capH.records(t), "tcp connection closed")
+		closeLog = findMessage(capH.records(t), "tcp_to_vsock connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -231,7 +230,7 @@ func TestInboundTCP_Passthrough_RoundTrip(t *testing.T) {
 		t.Errorf("remote attr missing or wrong type: %v", closeLog["remote"])
 	}
 
-	openLog := findMessage(capH.records(t), "inbound tcp connection")
+	openLog := findMessage(capH.records(t), "tcp_to_vsock connection opened")
 	if openLog == nil {
 		t.Fatalf("open log not emitted")
 	}
@@ -256,12 +255,11 @@ func TestInboundTCP_Passthrough_DialFailure(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, logger)
@@ -286,15 +284,15 @@ func TestInboundTCP_Passthrough_DialFailure(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		recs := capH.records(t)
-		failLog = findMessage(recs, "inbound tcp dial failed")
-		closeLog = findMessage(recs, "tcp connection closed")
+		failLog = findMessage(recs, "tcp_to_vsock dial failed")
+		closeLog = findMessage(recs, "tcp_to_vsock connection closed")
 		if failLog != nil && closeLog != nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if failLog == nil {
-		t.Fatalf("expected 'inbound tcp dial failed' log")
+		t.Fatalf("expected 'tcp_to_vsock dial failed' log")
 	}
 	if got := failLog["target_cid"]; got != float64(enclaveCID) {
 		t.Errorf("target_cid attr = %v, want %v", got, enclaveCID)
@@ -303,7 +301,7 @@ func TestInboundTCP_Passthrough_DialFailure(t *testing.T) {
 		t.Errorf("target_port attr = %v, want %v", got, vsockPort)
 	}
 	if closeLog == nil {
-		t.Fatalf("expected 'tcp connection closed' log even on dial fail")
+		t.Fatalf("expected 'tcp_to_vsock connection closed' log even on dial fail")
 	}
 	if got := closeLog["total_bytes"]; got != float64(0) {
 		t.Errorf("total_bytes on dial fail = %v, want 0", got)
@@ -353,12 +351,11 @@ func TestInboundTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, logger)
@@ -389,7 +386,7 @@ func TestInboundTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	var closeLog logRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		closeLog = findMessage(capH.records(t), "tcp connection closed")
+		closeLog = findMessage(capH.records(t), "tcp_to_vsock connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -438,14 +435,13 @@ func TestInboundTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	}()
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
-	s, err := NewServer(cfg, vsockconn.NewLoopbackDialer(reg, 2),
+	s, err := NewServer(nil, cfg, vsockconn.NewLoopbackDialer(reg, 2),
 		m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -494,20 +490,19 @@ func TestInboundTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	}
 }
 
-// TestInboundTCP_NewListenerAcceptsTCPMode sanity-checks the constructor
-// accepts a mode=tcp config and stores the atomic target fields.
-func TestInboundTCP_NewListenerAcceptsTCPMode(t *testing.T) {
+// TestInboundTCP_NewListenerAcceptsTCPConfig sanity-checks the constructor
+// accepts a tcp_to_vsock config and stores the atomic target fields.
+func TestInboundTCP_NewListenerAcceptsTCPConfig(t *testing.T) {
 	const cid uint32 = 7
 	const port uint32 = 4242
-	l, err := newListener(config.InboundListener{
-		Bind:       "127.0.0.1",
-		Port:       5432,
-		Mode:       config.ModeTCP,
-		TargetCID:  cid,
-		TargetPort: port,
+	l, err := newTCPToVsockListener(config.TCPToVsockListener{
+		Bind:      "127.0.0.1",
+		Port:      5432,
+		VsockCID:  cid,
+		VsockPort: port,
 	}, &Server{})
 	if err != nil {
-		t.Fatalf("newListener: %v", err)
+		t.Fatalf("newTCPToVsockListener: %v", err)
 	}
 	if got := l.targetCID.Load(); got != cid {
 		t.Errorf("targetCID = %d, want %d", got, cid)
@@ -552,9 +547,9 @@ func waitForPlainCounter(t *testing.T, c prometheus.Counter, want float64) {
 		want, plainCounterValue(t, c))
 }
 
-// TestInboundTCP_Passthrough_MetricsIncrement verifies the mode=tcp
-// inbound handler increments the new counters: one connection, byte
-// totals matching the echo round-trip, no error counters touched.
+// TestInboundTCP_Passthrough_MetricsIncrement verifies the tcp_to_vsock
+// handler increments the new counters: one connection, byte totals
+// matching the echo round-trip, no error counters touched.
 func TestInboundTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	reg := vsockconn.NewRegistry()
 	const enclaveCID uint32 = 16
@@ -562,12 +557,11 @@ func TestInboundTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	startTCPEchoTarget(t, reg, enclaveCID, vsockPort)
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, discardLogger())
@@ -587,16 +581,16 @@ func TestInboundTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	}
 	_ = client.Close()
 
-	waitForPlainCounter(t, m.TCPInboundConnections, 1)
-	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+	waitForPlainCounter(t, m.TCPToVsockConnections, 1)
+	waitForCounter(t, m.TCPToVsockBytes, float64(len(payload)),
 		metrics.DirectionUp)
-	waitForCounter(t, m.TCPInboundBytes, float64(len(payload)),
+	waitForCounter(t, m.TCPToVsockBytes, float64(len(payload)),
 		metrics.DirectionDown)
 
-	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorDial); got != 0 {
+	if got := counterValue(t, m.TCPToVsockErrors, metrics.TCPErrorDial); got != 0 {
 		t.Errorf("dial error counter = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPInboundErrors, metrics.TCPErrorCopy); got != 0 {
+	if got := counterValue(t, m.TCPToVsockErrors, metrics.TCPErrorCopy); got != 0 {
 		t.Errorf("copy error counter = %v, want 0", got)
 	}
 }
@@ -610,12 +604,11 @@ func TestInboundTCP_Passthrough_MetricsDialFail(t *testing.T) {
 	const vsockPort uint32 = 8080
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, discardLogger())
@@ -629,13 +622,13 @@ func TestInboundTCP_Passthrough_MetricsDialFail(t *testing.T) {
 	_, _ = client.Read(buf)
 	_ = client.Close()
 
-	waitForPlainCounter(t, m.TCPInboundConnections, 1)
-	waitForCounter(t, m.TCPInboundErrors, 1, metrics.TCPErrorDial)
+	waitForPlainCounter(t, m.TCPToVsockConnections, 1)
+	waitForCounter(t, m.TCPToVsockErrors, 1, metrics.TCPErrorDial)
 
-	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionUp); got != 0 {
+	if got := counterValue(t, m.TCPToVsockBytes, metrics.DirectionUp); got != 0 {
 		t.Errorf("DirectionUp bytes = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPInboundBytes, metrics.DirectionDown); got != 0 {
+	if got := counterValue(t, m.TCPToVsockBytes, metrics.DirectionDown); got != 0 {
 		t.Errorf("DirectionDown bytes = %v, want 0", got)
 	}
 }
@@ -651,12 +644,11 @@ func TestInboundTCP_Passthrough_ConcurrentConnections(t *testing.T) {
 	startTCPEchoTarget(t, reg, enclaveCID, vsockPort)
 
 	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       0,
-		Mode:       config.ModeTCP,
-		TargetCID:  enclaveCID,
-		TargetPort: vsockPort,
+	cfg := []config.TCPToVsockListener{{
+		Bind:      "127.0.0.1",
+		Port:      0,
+		VsockCID:  enclaveCID,
+		VsockPort: vsockPort,
 	}}
 	s := startTCPInboundServer(t, cfg,
 		vsockconn.NewLoopbackDialer(reg, 2), m, discardLogger())
@@ -718,13 +710,12 @@ func TestInboundTCP_DialCancelledByShutdown(t *testing.T) {
 		_ = l.Close()
 		return p
 	}()
-	s, err := NewServer(
-		[]config.InboundListener{{
-			Bind:       "127.0.0.1",
-			Port:       ephemeralPort,
-			Mode:       config.ModeTCP,
-			TargetCID:  16,
-			TargetPort: 1,
+	s, err := NewServer(nil,
+		[]config.TCPToVsockListener{{
+			Bind:      "127.0.0.1",
+			Port:      ephemeralPort,
+			VsockCID:  16,
+			VsockPort: 1,
 		}},
 		dialer, m, discardLogger(),
 	)
@@ -763,58 +754,84 @@ func TestInboundTCP_DialCancelledByShutdown(t *testing.T) {
 }
 
 // TestInboundTCP_ApplyTargetChangeReturnsClearError verifies that SIGHUP
-// reloading an inbound mode=tcp listener with a different target_cid or
-// target_port on the same bind:port is rejected with a descriptive
+// reloading a tcp_to_vsock listener with a different vsock_cid or
+// vsock_port on the same bind:port is rejected with a descriptive
 // "restart required" error rather than silently dropping the edit — the
 // atomic target fields are never updated by CommitApply today, so
 // accepting the reload would leave traffic flowing to the previous
 // enclave while config_reloads_total{result="success"} ticks up.
 func TestInboundTCP_ApplyTargetChangeReturnsClearError(t *testing.T) {
-	port := func() int {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
-		p := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		return p
-	}()
-
-	m := metrics.New()
-	cfg := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       port,
-		Mode:       config.ModeTCP,
-		TargetCID:  16,
-		TargetPort: 1,
-	}}
-	s := startServer(t, cfg, vsockconn.NewLoopbackDialer(
-		vsockconn.NewRegistry(), 2), m)
-
-	updated := []config.InboundListener{{
-		Bind:       "127.0.0.1",
-		Port:       port,
-		Mode:       config.ModeTCP,
-		TargetCID:  16,
-		TargetPort: 2, // port change only
-	}}
-	err := s.Apply(updated)
-	if err == nil {
-		t.Fatal("Apply with changed target_port returned nil, want error")
+	cases := []struct {
+		name      string
+		newCID    uint32
+		newPort   uint32
+	}{
+		{name: "vsock_port change", newCID: 16, newPort: 2},
+		{name: "vsock_cid change", newCID: 17, newPort: 1},
+		{name: "both change", newCID: 17, newPort: 2},
 	}
-	if !strings.Contains(err.Error(), "restart required") {
-		t.Fatalf("Apply error = %q; want mention of restart required",
-			err.Error())
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			port := func() int {
+				l, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				p := l.Addr().(*net.TCPAddr).Port
+				_ = l.Close()
+				return p
+			}()
 
-	// Running listener must keep its original target.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.listeners) != 1 {
-		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
-	}
-	if got := s.listeners[0].targetPort.Load(); got != 1 {
-		t.Fatalf("targetPort = %d; want original 1 preserved", got)
+			m := metrics.New()
+			tcpCfg := []config.TCPToVsockListener{{
+				Bind:      "127.0.0.1",
+				Port:      port,
+				VsockCID:  16,
+				VsockPort: 1,
+			}}
+			s, err := NewServer(nil, tcpCfg, vsockconn.NewLoopbackDialer(
+				vsockconn.NewRegistry(), 2), m, discardLogger())
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancel()
+				sc, scancel := context.WithTimeout(
+					context.Background(), 2*time.Second)
+				defer scancel()
+				_ = s.Shutdown(sc)
+			})
+			if err := s.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			updated := []config.TCPToVsockListener{{
+				Bind:      "127.0.0.1",
+				Port:      port,
+				VsockCID:  tc.newCID,
+				VsockPort: tc.newPort,
+			}}
+			err = s.Apply(nil, updated)
+			if err == nil {
+				t.Fatal("Apply with changed target returned nil, want error")
+			}
+			if !strings.Contains(err.Error(), "restart required") {
+				t.Fatalf("Apply error = %q; want mention of restart required",
+					err.Error())
+			}
+
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(s.listeners) != 1 {
+				t.Fatalf("listeners len = %d, want 1", len(s.listeners))
+			}
+			if got := s.listeners[0].targetPort.Load(); got != 1 {
+				t.Fatalf("targetPort = %d; want original 1 preserved", got)
+			}
+			if got := s.listeners[0].targetCID.Load(); got != 16 {
+				t.Fatalf("targetCID = %d; want original 16 preserved", got)
+			}
+		})
 	}
 }
-

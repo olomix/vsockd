@@ -4,6 +4,129 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hard breaking change: TCP passthrough listeners moved out of
+`inbound` / `outbound` into their own top-level sections, renamed from
+the host-role vocabulary to what they actually do. The `metrics` section
+is enclave-friendly: no implicit `:9090` default and a new vsock bind.
+There is no YAML back-compat shim, no metric alias, and no implicit
+metrics listener — old configs fail loudly at startup.
+
+### Added
+
+- Top-level `tcp_to_vsock` YAML section — listens on a TCP port and
+  forwards raw bytes to a fixed vsock endpoint. Works identically on
+  the host and inside the enclave.
+- Top-level `vsock_to_tcp` YAML section — listens on a vsock port and
+  forwards raw bytes to a fixed TCP upstream. Works identically on the
+  host and inside the enclave.
+- `metrics.vsock_port` — expose `/metrics` over vsock
+  (`VMADDR_CID_ANY`) so an enclave-side vsockd can be scraped from the
+  parent host. Mutually exclusive with `metrics.bind`.
+
+### Changed
+
+- Prometheus metrics for TCP passthrough renamed in lockstep with the
+  new section names:
+
+  | Old | New |
+  |---|---|
+  | `tcp_inbound_connections_total` | `tcp_to_vsock_connections_total` |
+  | `tcp_inbound_bytes_total` | `tcp_to_vsock_bytes_total` |
+  | `tcp_inbound_errors_total` | `tcp_to_vsock_errors_total` |
+  | `tcp_outbound_connections_total` | `vsock_to_tcp_connections_total` |
+  | `tcp_outbound_bytes_total` | `vsock_to_tcp_bytes_total` |
+  | `tcp_outbound_errors_total` | `vsock_to_tcp_errors_total` |
+
+- Debug / warn log messages on the passthrough path renamed:
+  `"inbound tcp connection"` → `"tcp_to_vsock connection opened"`,
+  `"tcp connection closed"` → `"tcp_to_vsock connection closed"`,
+  `"inbound vsock connection"` → `"vsock_to_tcp connection opened"`,
+  `"vsock connection closed"` → `"vsock_to_tcp connection closed"`.
+  Structured attributes (`cid`, `port`, `listen_port`, `remote`,
+  `listen`, `total_bytes`) are unchanged.
+- Metrics endpoint is **disabled by default**. The `-metrics-addr` flag
+  default dropped from `":9090"` to `""`. The endpoint starts only when
+  at least one of `-metrics-addr`, `metrics.bind`, or
+  `metrics.vsock_port` is set, in that precedence order. Unset =
+  silently disabled; startup log reads `metrics=disabled`.
+- The startup metrics log key changed from `metrics_addr` to `metrics`,
+  with a richer value: `"disabled"`, `"tcp <addr>"`, or
+  `"vsock port=<n>"`.
+- Project description and README updated to drop host-only framing —
+  vsockd is now a general-purpose vsock↔TCP bridge whose HTTP-aware
+  features (`http-host` / `tls-sni` routing, forward proxy) remain
+  host-role-specific.
+
+### Removed
+
+- `mode: tcp` under `inbound` and `outbound`. Old configs fail at parse
+  time with a strict-YAML "unknown field" error pointing at
+  `target_cid` / `target_port` (inbound) or `mode` / `upstream`
+  (outbound).
+- Implicit `:9090` metrics default. Hosts that previously relied on the
+  flag default must now opt in explicitly — otherwise the endpoint is
+  silently off and monitoring will stop receiving data.
+
+### Migration
+
+Old YAML:
+
+```yaml
+inbound:
+  - bind: 0.0.0.0
+    port: 5432
+    mode: tcp
+    target_cid: 16
+    target_port: 5432
+
+outbound:
+  - port: 9000
+    mode: tcp
+    upstream: 10.0.0.5:5432
+```
+
+New YAML:
+
+```yaml
+tcp_to_vsock:
+  - bind: 0.0.0.0
+    port: 5432
+    vsock_cid: 16
+    vsock_port: 5432
+
+vsock_to_tcp:
+  - port: 9000
+    upstream: 10.0.0.5:5432
+```
+
+To keep metrics behavior equivalent to the old implicit default, add:
+
+```yaml
+metrics:
+  bind: 0.0.0.0:9090
+```
+
+Or, for an enclave-side vsockd you want the parent host to scrape:
+
+```yaml
+metrics:
+  vsock_port: 9090
+```
+
+Grafana dashboards and Prometheus recording / alerting rules that
+reference the renamed metrics can be migrated with:
+
+```sh
+sed -i 's/tcp_inbound_/tcp_to_vsock_/g; s/tcp_outbound_/vsock_to_tcp_/g' <files>
+```
+
+Log-based alerting that greps for `"inbound tcp connection"`,
+`"inbound vsock connection"`, `"tcp connection closed"`, or
+`"vsock connection closed"` no longer matches — update patterns to the
+new strings listed in the Changed section above.
+
 ## [0.1.0] — 2026-04-19
 
 Initial release. A single static Go binary that runs on the parent EC2 host
@@ -59,4 +182,5 @@ of AWS Nitro Enclaves and proxies traffic in both directions over vsock.
 - No special handling for plain-HTTP WebSocket upgrades.
 - No regex patterns in the allowlist — only exact, suffix, and universal.
 
+[Unreleased]: https://github.com/olomix/vsockd/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/olomix/vsockd/releases/tag/v0.1.0

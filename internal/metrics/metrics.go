@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/olomix/vsockd/internal/vsockconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -70,12 +71,12 @@ type Metrics struct {
 	// direction ∈ {up, down}, reason ∈ {dial_fail, copy_error}. No
 	// per-connection identifiers leak into label values, so cardinality is
 	// constant regardless of traffic patterns.
-	TCPInboundConnections  prometheus.Counter
-	TCPInboundBytes        *prometheus.CounterVec
-	TCPInboundErrors       *prometheus.CounterVec
-	TCPOutboundConnections prometheus.Counter
-	TCPOutboundBytes       *prometheus.CounterVec
-	TCPOutboundErrors      *prometheus.CounterVec
+	TCPToVsockConnections prometheus.Counter
+	TCPToVsockBytes       *prometheus.CounterVec
+	TCPToVsockErrors      *prometheus.CounterVec
+	VsockToTCPConnections prometheus.Counter
+	VsockToTCPBytes       *prometheus.CounterVec
+	VsockToTCPErrors      *prometheus.CounterVec
 
 	ConfigReloads *prometheus.CounterVec
 }
@@ -120,43 +121,43 @@ func New() *Metrics {
 			},
 			[]string{"cid", "direction"},
 		),
-		TCPInboundConnections: prometheus.NewCounter(
+		TCPToVsockConnections: prometheus.NewCounter(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_connections_total",
-				Help: "TCP connections accepted on mode=tcp inbound listeners.",
+				Name: "tcp_to_vsock_connections_total",
+				Help: "TCP connections accepted on tcp_to_vsock listeners.",
 			},
 		),
-		TCPInboundBytes: prometheus.NewCounterVec(
+		TCPToVsockBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_bytes_total",
-				Help: "Bytes proxied on mode=tcp inbound connections, by direction.",
+				Name: "tcp_to_vsock_bytes_total",
+				Help: "Bytes proxied on tcp_to_vsock connections, by direction.",
 			},
 			[]string{"direction"},
 		),
-		TCPInboundErrors: prometheus.NewCounterVec(
+		TCPToVsockErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_inbound_errors_total",
-				Help: "Errors on mode=tcp inbound connections, by reason.",
+				Name: "tcp_to_vsock_errors_total",
+				Help: "Errors on tcp_to_vsock connections, by reason.",
 			},
 			[]string{"reason"},
 		),
-		TCPOutboundConnections: prometheus.NewCounter(
+		VsockToTCPConnections: prometheus.NewCounter(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_connections_total",
-				Help: "vsock connections accepted on mode=tcp outbound listeners.",
+				Name: "vsock_to_tcp_connections_total",
+				Help: "vsock connections accepted on vsock_to_tcp listeners.",
 			},
 		),
-		TCPOutboundBytes: prometheus.NewCounterVec(
+		VsockToTCPBytes: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_bytes_total",
-				Help: "Bytes proxied on mode=tcp outbound connections, by direction.",
+				Name: "vsock_to_tcp_bytes_total",
+				Help: "Bytes proxied on vsock_to_tcp connections, by direction.",
 			},
 			[]string{"direction"},
 		),
-		TCPOutboundErrors: prometheus.NewCounterVec(
+		VsockToTCPErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "tcp_outbound_errors_total",
-				Help: "Errors on mode=tcp outbound connections, by reason.",
+				Name: "vsock_to_tcp_errors_total",
+				Help: "Errors on vsock_to_tcp connections, by reason.",
 			},
 			[]string{"reason"},
 		),
@@ -175,12 +176,12 @@ func New() *Metrics {
 		m.InboundErrors,
 		m.OutboundConnections,
 		m.OutboundBytes,
-		m.TCPInboundConnections,
-		m.TCPInboundBytes,
-		m.TCPInboundErrors,
-		m.TCPOutboundConnections,
-		m.TCPOutboundBytes,
-		m.TCPOutboundErrors,
+		m.TCPToVsockConnections,
+		m.TCPToVsockBytes,
+		m.TCPToVsockErrors,
+		m.VsockToTCPConnections,
+		m.VsockToTCPBytes,
+		m.VsockToTCPErrors,
 		m.ConfigReloads,
 	)
 	return m
@@ -213,6 +214,30 @@ func FormatCID(cid uint32) string {
 func ListenMetrics(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
+
+// vsockNetListener adapts vsockconn.Listener (whose Accept returns the
+// typed vsockconn.Conn) into a net.Listener. ServeMetrics only needs
+// Accept/Close/Addr, so the adapter is three trivial methods.
+type vsockNetListener struct {
+	inner vsockconn.Listener
+}
+
+// NewVsockNetListener wraps a vsockconn.Listener so it can be passed to
+// ServeMetrics. Used when /metrics is exposed over AF_VSOCK.
+func NewVsockNetListener(ln vsockconn.Listener) net.Listener {
+	return &vsockNetListener{inner: ln}
+}
+
+func (v *vsockNetListener) Accept() (net.Conn, error) {
+	c, err := v.inner.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (v *vsockNetListener) Close() error   { return v.inner.Close() }
+func (v *vsockNetListener) Addr() net.Addr { return v.inner.Addr() }
 
 // ServeMetrics runs the /metrics HTTP server on ln and blocks until ctx is
 // cancelled or the server fails. On cancellation, srv.Shutdown is given up

@@ -1,19 +1,18 @@
 // Package outbound implements the vsock-facing proxy used by enclaves to
 // reach external destinations.
 //
-// Each configured outbound port listens on vsock and runs in one of two
-// modes:
+// Each configured listener listens on vsock and runs in one of two modes:
 //
-//   - HTTP forward proxy (legacy, mode unset). Every accepted connection
-//     is authorized by peer CID before any bytes are read; unauthorized
-//     peers are dropped and counted as "denied". Authorized peers get
-//     exactly one HTTP request parsed — CONNECT (HTTPS tunnel) or
-//     absolute-URI GET/POST (plain HTTP) — whose destination is matched
+//   - HTTP forward proxy (config.OutboundListener). Every accepted
+//     connection is authorized by peer CID before any bytes are read;
+//     unauthorized peers are dropped and counted as "denied". Authorized
+//     peers get exactly one HTTP request parsed — CONNECT (HTTPS tunnel)
+//     or absolute-URI GET/POST (plain HTTP) — whose destination is matched
 //     against that CID's egress allowlist. Allow → dial TCP, proxy the
 //     request/tunnel. Deny → 403 and close.
-//   - TCP passthrough (mode: tcp). Accepted vsock connections are piped
-//     bidirectionally to a fixed upstream host:port. No HTTP parsing, no
-//     per-CID allowlist.
+//   - TCP passthrough (config.VsockToTCPListener). Accepted vsock
+//     connections are piped bidirectionally to a fixed upstream host:port.
+//     No HTTP parsing, no per-CID allowlist.
 package outbound
 
 import (
@@ -45,6 +44,15 @@ const (
 	headerReadTimeout   = 30 * time.Second
 	upstreamDialTimeout = 30 * time.Second
 	statusWriteTimeout  = 5 * time.Second
+)
+
+// modeHTTPProxy labels listeners derived from config.OutboundListener
+// (the HTTP forward-proxy path). modeVsockToTCP labels listeners derived
+// from config.VsockToTCPListener (raw passthrough). These are internal
+// sentinels, not user-visible YAML values.
+const (
+	modeHTTPProxy   = ""
+	modeVsockToTCP  = "vsock_to_tcp"
 )
 
 // ListenFunc opens a vsock-style Listener on the given port. Production
@@ -80,12 +88,14 @@ type Server struct {
 	wg sync.WaitGroup
 }
 
-// NewServer wires a Server from the outbound config. Listeners are not
-// bound yet; Start performs the bind. Returns an error if any per-listener
-// configuration is inconsistent (for example, a duplicate CID on the same
-// port — cross-port duplicates are caught earlier in config.Validate).
+// NewServer wires a Server from the HTTP-proxy and vsock_to_tcp config.
+// Listeners are not bound yet; Start performs the bind. Returns an error
+// if any per-listener configuration is inconsistent (for example, a
+// duplicate CID on the same port — cross-port duplicates are caught
+// earlier in config.Validate).
 func NewServer(
-	cfgs []config.OutboundListener,
+	httpCfgs []config.OutboundListener,
+	tcpCfgs []config.VsockToTCPListener,
 	listenFn ListenFunc,
 	m *metrics.Metrics,
 	logger *slog.Logger,
@@ -106,10 +116,17 @@ func NewServer(
 		logger:     logger,
 		activeConn: map[net.Conn]struct{}{},
 	}
-	for i := range cfgs {
-		ln, err := newListener(cfgs[i], s)
+	for i := range httpCfgs {
+		ln, err := newHTTPListener(httpCfgs[i], s)
 		if err != nil {
 			return nil, fmt.Errorf("outbound[%d]: %w", i, err)
+		}
+		s.listeners = append(s.listeners, ln)
+	}
+	for i := range tcpCfgs {
+		ln, err := newVsockToTCPListener(tcpCfgs[i], s)
+		if err != nil {
+			return nil, fmt.Errorf("vsock_to_tcp[%d]: %w", i, err)
 		}
 		s.listeners = append(s.listeners, ln)
 	}
@@ -134,7 +151,7 @@ func (s *Server) ListenerPorts() []uint32 {
 	defer s.mu.Unlock()
 	out := make([]uint32, 0, len(s.listeners))
 	for _, ln := range s.listeners {
-		out = append(out, ln.cfg.Port)
+		out = append(out, ln.port)
 	}
 	return out
 }
@@ -186,7 +203,7 @@ type applySwap struct {
 	listener *listener
 	matchers map[uint32]*allowlist.Matcher
 	// upstream is populated only when both the existing and new configs
-	// declare mode: tcp on the same port; it then carries the reload's new
+	// are vsock_to_tcp on the same port; it then carries the reload's new
 	// upstream host:port so CommitApply can atomically swap it without
 	// tearing down the accept loop. In-flight connections keep using the
 	// upstream they already dialed; new accepts pick up the replacement.
@@ -198,7 +215,10 @@ type applySwap struct {
 // state. Returns an ApplyPlan that the caller must resolve via CommitApply
 // or AbortApply. Cross-port CID uniqueness is assumed to have been checked
 // by config.Validate before this is called.
-func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error) {
+func (s *Server) PrepareApply(
+	httpCfgs []config.OutboundListener,
+	tcpCfgs []config.VsockToTCPListener,
+) (*ApplyPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -208,11 +228,12 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 
 	existing := make(map[uint32]*listener, len(s.listeners))
 	for _, ln := range s.listeners {
-		existing[ln.cfg.Port] = ln
+		existing[ln.port] = ln
 	}
 
-	kept := make(map[uint32]bool, len(cfgs))
-	next := make([]*listener, 0, len(cfgs))
+	total := len(httpCfgs) + len(tcpCfgs)
+	kept := make(map[uint32]bool, total)
+	next := make([]*listener, 0, total)
 	var swaps []applySwap
 	var newBinds []*listener
 	cleanup := func() {
@@ -221,42 +242,62 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 		}
 	}
 
-	for i := range cfgs {
-		cfg := cfgs[i]
-		newLn, err := newListener(cfg, s)
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("outbound[%d]: %w", i, err)
-		}
-		if cur, ok := existing[cfg.Port]; ok {
-			// cur.cfg.Mode is what run() dispatches on and cannot be mutated
-			// safely while the accept loop runs. Mirror the inbound guard:
-			// flipping between HTTP and tcp on the same port at runtime is
-			// not supported; operator must restart the daemon.
-			if cur.cfg.Mode != cfg.Mode {
-				cleanup()
-				return nil, fmt.Errorf(
-					"outbound[%d]: cannot change mode on port %d from %q to %q at runtime; restart required",
-					i, cfg.Port, cur.cfg.Mode, cfg.Mode)
+	apply := func(section string, i int, newLn *listener) error {
+		if cur, ok := existing[newLn.port]; ok {
+			// cur.mode is what run() dispatches on and cannot be mutated
+			// safely while the accept loop runs. Flipping between HTTP and
+			// tcp_to_vsock on the same port at runtime is not supported;
+			// operator must restart the daemon. Config validation already
+			// rejects the port appearing in both sections at load time, so
+			// this branch only triggers when an operator swaps the YAML
+			// section for the same port across a reload.
+			if cur.mode != newLn.mode {
+				return fmt.Errorf(
+					"%s[%d]: cannot change mode on port %d from %q to %q at runtime; restart required",
+					section, i, newLn.port,
+					displayMode(cur.mode), displayMode(newLn.mode))
 			}
 			// Port+mode matches; swap only the mutable state (matcher table
 			// for HTTP mode, upstream for TCP mode).
 			sw := applySwap{listener: cur, matchers: newLn.matchersSnapshot()}
-			if cfg.Mode == config.ModeTCP {
+			if newLn.mode == modeVsockToTCP {
 				u := newLn.upstreamSnapshot()
 				sw.upstream = &u
 			}
 			swaps = append(swaps, sw)
-			kept[cfg.Port] = true
+			kept[newLn.port] = true
 			next = append(next, cur)
-			continue
+			return nil
 		}
 		if err := newLn.bind(); err != nil {
-			cleanup()
-			return nil, err
+			return err
 		}
 		newBinds = append(newBinds, newLn)
 		next = append(next, newLn)
+		return nil
+	}
+
+	for i := range httpCfgs {
+		newLn, err := newHTTPListener(httpCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("outbound[%d]: %w", i, err)
+		}
+		if err := apply("outbound", i, newLn); err != nil {
+			cleanup()
+			return nil, err
+		}
+	}
+	for i := range tcpCfgs {
+		newLn, err := newVsockToTCPListener(tcpCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("vsock_to_tcp[%d]: %w", i, err)
+		}
+		if err := apply("vsock_to_tcp", i, newLn); err != nil {
+			cleanup()
+			return nil, err
+		}
 	}
 
 	return &ApplyPlan{
@@ -267,6 +308,16 @@ func (s *Server) PrepareApply(cfgs []config.OutboundListener) (*ApplyPlan, error
 		existing: existing,
 		kept:     kept,
 	}, nil
+}
+
+// displayMode renders an internal mode tag for use in operator-facing
+// error text. The HTTP-proxy listener has an empty internal mode tag; show
+// it as "outbound" in messages since that is the YAML section name.
+func displayMode(m string) string {
+	if m == modeHTTPProxy {
+		return "outbound"
+	}
+	return m
 }
 
 // CommitApply publishes the diff built by PrepareApply. This phase cannot
@@ -316,8 +367,11 @@ func (p *ApplyPlan) AbortApply() {
 // Apply is a convenience wrapper that prepares and commits in a single
 // call. Use PrepareApply/CommitApply when coordinating with other
 // subsystems to keep the reload atomic across them.
-func (s *Server) Apply(cfgs []config.OutboundListener) error {
-	plan, err := s.PrepareApply(cfgs)
+func (s *Server) Apply(
+	httpCfgs []config.OutboundListener,
+	tcpCfgs []config.VsockToTCPListener,
+) error {
+	plan, err := s.PrepareApply(httpCfgs, tcpCfgs)
 	if err != nil {
 		return err
 	}
@@ -372,9 +426,12 @@ func (s *Server) untrackConn(c net.Conn) {
 	s.connMu.Unlock()
 }
 
-// listener owns one vsock accept loop for a single OutboundListener.
+// listener owns one vsock accept loop for a single configured port. The
+// mode field determines dispatch: modeHTTPProxy takes the HTTP
+// forward-proxy path; modeVsockToTCP takes handleTCP.
 type listener struct {
-	cfg    config.OutboundListener
+	port   uint32
+	mode   string
 	server *Server
 
 	ln vsockconn.Listener
@@ -382,22 +439,19 @@ type listener struct {
 	// matchers holds the authorized-CID → compiled allowlist table. Stored
 	// as an atomic pointer so Apply can swap the whole table at reload
 	// time without disturbing in-flight connections. Only populated for
-	// legacy HTTP-mode listeners (cfg.Mode == "").
+	// HTTP-proxy listeners.
 	matchers atomic.Pointer[map[uint32]*allowlist.Matcher]
 
-	// upstream holds the live TCP upstream address for mode=tcp listeners.
-	// Atomic so SIGHUP reloads can swap the destination without tearing
-	// down the vsock accept loop. Unused for HTTP-mode listeners.
+	// upstream holds the live TCP upstream address for vsock_to_tcp
+	// listeners. Atomic so SIGHUP reloads can swap the destination without
+	// tearing down the vsock accept loop. Unused for HTTP-proxy listeners.
 	upstream atomic.Pointer[string]
 }
 
-func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
-	l := &listener{cfg: cfg, server: s}
-	if cfg.Mode == config.ModeTCP {
-		u := cfg.Upstream
-		l.upstream.Store(&u)
-		return l, nil
-	}
+func newHTTPListener(
+	cfg config.OutboundListener, s *Server,
+) (*listener, error) {
+	l := &listener{port: cfg.Port, mode: modeHTTPProxy, server: s}
 	if len(cfg.CIDs) == 0 {
 		return nil, fmt.Errorf("port %d: no cids configured", cfg.Port)
 	}
@@ -418,6 +472,15 @@ func newListener(cfg config.OutboundListener, s *Server) (*listener, error) {
 	return l, nil
 }
 
+func newVsockToTCPListener(
+	cfg config.VsockToTCPListener, s *Server,
+) (*listener, error) {
+	l := &listener{port: cfg.Port, mode: modeVsockToTCP, server: s}
+	u := cfg.Upstream
+	l.upstream.Store(&u)
+	return l, nil
+}
+
 func (l *listener) matchersSnapshot() map[uint32]*allowlist.Matcher {
 	p := l.matchers.Load()
 	if p == nil {
@@ -431,8 +494,8 @@ func (l *listener) replaceMatchers(m map[uint32]*allowlist.Matcher) {
 }
 
 // upstreamSnapshot returns the currently configured upstream host:port
-// for a TCP-mode listener. Safe to call concurrently with reloads: the
-// atomic pointer guarantees readers see one self-consistent value.
+// for a vsock_to_tcp listener. Safe to call concurrently with reloads:
+// the atomic pointer guarantees readers see one self-consistent value.
 func (l *listener) upstreamSnapshot() string {
 	p := l.upstream.Load()
 	if p == nil {
@@ -442,7 +505,7 @@ func (l *listener) upstreamSnapshot() string {
 }
 
 // replaceUpstream atomically swaps the live TCP upstream host:port so a
-// reload changing just the upstream of an existing mode: tcp listener
+// reload changing just the upstream of an existing vsock_to_tcp listener
 // takes effect on the next accepted connection, without tearing down the
 // accept loop.
 func (l *listener) replaceUpstream(u string) {
@@ -450,9 +513,9 @@ func (l *listener) replaceUpstream(u string) {
 }
 
 func (l *listener) bind() error {
-	ln, err := l.server.listenFunc(l.cfg.Port)
+	ln, err := l.server.listenFunc(l.port)
 	if err != nil {
-		return fmt.Errorf("listen vsock port %d: %w", l.cfg.Port, err)
+		return fmt.Errorf("listen vsock port %d: %w", l.port, err)
 	}
 	l.ln = ln
 	return nil
@@ -484,7 +547,7 @@ func (l *listener) run(ctx context.Context) {
 				tempDelay = time.Second
 			}
 			l.server.logger.Warn("outbound accept error",
-				"port", l.cfg.Port, "err", err, "retry_in", tempDelay)
+				"port", l.port, "err", err, "retry_in", tempDelay)
 			select {
 			case <-time.After(tempDelay):
 			case <-ctx.Done():
@@ -506,13 +569,13 @@ func (l *listener) run(ctx context.Context) {
 		// contract would hold only for connections that have reached
 		// the DialContext line.
 		var tcpUpstream string
-		if l.cfg.Mode == config.ModeTCP {
+		if l.mode == modeVsockToTCP {
 			tcpUpstream = l.upstreamSnapshot()
 		}
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
-			if l.cfg.Mode == config.ModeTCP {
+			if l.mode == modeVsockToTCP {
 				l.handleTCP(ctx, c, tcpUpstream)
 				return
 			}
@@ -535,7 +598,7 @@ func (l *listener) handle(ctx context.Context, c vsockconn.Conn) {
 		l.server.metric.OutboundConnections.
 			WithLabelValues(metrics.CIDLabelUnauthorized, metrics.OutboundResultDenied).Inc()
 		l.server.logger.Warn("outbound peer cid not authorized for port",
-			"port", l.cfg.Port, "cid", cid)
+			"port", l.port, "cid", cid)
 		return
 	}
 	cidLabel := metrics.FormatCID(cid)
@@ -549,7 +612,7 @@ func (l *listener) handle(ctx context.Context, c vsockconn.Conn) {
 		l.server.metric.OutboundConnections.
 			WithLabelValues(cidLabel, metrics.OutboundResultError).Inc()
 		l.server.logger.Warn("outbound bad request",
-			"port", l.cfg.Port, "cid", cid, "err", err)
+			"port", l.port, "cid", cid, "err", err)
 		return
 	}
 
@@ -563,7 +626,7 @@ func (l *listener) handle(ctx context.Context, c vsockconn.Conn) {
 		l.server.metric.OutboundConnections.
 			WithLabelValues(cidLabel, metrics.OutboundResultError).Inc()
 		l.server.logger.Warn("outbound non-proxy request",
-			"port", l.cfg.Port, "cid", cid,
+			"port", l.port, "cid", cid,
 			"method", req.Method, "requestURI", req.RequestURI)
 	}
 }

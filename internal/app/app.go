@@ -38,9 +38,14 @@ type Options struct {
 	// Logger receives structured logs. Required.
 	Logger *slog.Logger
 
-	// MetricsAddr is the listen address for the /metrics HTTP endpoint.
-	// Ignored when empty (no metrics endpoint is started).
+	// MetricsAddr is the TCP listen address for the /metrics HTTP endpoint.
+	// Mutually exclusive with MetricsVsockPort; both zero disables the
+	// endpoint entirely.
 	MetricsAddr string
+
+	// MetricsVsockPort exposes /metrics over AF_VSOCK from VMADDR_CID_ANY.
+	// Mutually exclusive with MetricsAddr; zero means "no vsock metrics".
+	MetricsVsockPort uint32
 
 	// VsockDialer reaches enclaves from inbound. Required.
 	VsockDialer vsockconn.Dialer
@@ -90,12 +95,14 @@ func New(opts Options) (*App, error) {
 	m := metrics.New()
 
 	in, err := inbound.NewServer(
-		opts.Config.Inbound, opts.VsockDialer, m, opts.Logger)
+		opts.Config.Inbound, opts.Config.TCPToVsock,
+		opts.VsockDialer, m, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("inbound: %w", err)
 	}
 	out, err := outbound.NewServer(
-		opts.Config.Outbound, opts.VsockListenFn, m, opts.Logger)
+		opts.Config.Outbound, opts.Config.VsockToTCP,
+		opts.VsockListenFn, m, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("outbound: %w", err)
 	}
@@ -119,6 +126,11 @@ func (a *App) Inbound() *inbound.Server { return a.inbound }
 // Outbound returns the outbound server. Used by tests.
 func (a *App) Outbound() *outbound.Server { return a.out }
 
+// MetricsListener returns the active /metrics net.Listener, or nil when
+// the endpoint is disabled. Used by tests to verify the disabled path
+// does not quietly bind a listener.
+func (a *App) MetricsListener() net.Listener { return a.metricsLn }
+
 // Start binds all inbound and outbound listeners and launches the metrics
 // HTTP endpoint if configured. ctx is retained by the servers for the life
 // of their accept loops; cancelling ctx does NOT trigger a graceful
@@ -126,6 +138,15 @@ func (a *App) Outbound() *outbound.Server { return a.out }
 func (a *App) Start(ctx context.Context) error {
 	a.reloadMu.Lock()
 	defer a.reloadMu.Unlock()
+
+	// Mutual exclusion is already enforced in config.Validate and
+	// resolveMetrics; a defensive check here catches any direct-API misuse
+	// that bypassed those paths. Run before subsystem Start so misuse
+	// surfaces without side effects.
+	if a.opts.MetricsAddr != "" && a.opts.MetricsVsockPort != 0 {
+		return errors.New(
+			"app: MetricsAddr and MetricsVsockPort are mutually exclusive")
+	}
 
 	if err := a.inbound.Start(ctx); err != nil {
 		return fmt.Errorf("inbound start: %w", err)
@@ -135,7 +156,9 @@ func (a *App) Start(ctx context.Context) error {
 		return fmt.Errorf("outbound start: %w", err)
 	}
 
-	if a.opts.MetricsAddr != "" {
+	metricsSummary := "disabled"
+	switch {
+	case a.opts.MetricsAddr != "":
 		// Bind synchronously so EADDRINUSE / permission errors abort Start
 		// instead of vanishing into an async log line that leaves the daemon
 		// running without a /metrics endpoint.
@@ -146,24 +169,54 @@ func (a *App) Start(ctx context.Context) error {
 			return fmt.Errorf(
 				"metrics listen %s: %w", a.opts.MetricsAddr, err)
 		}
-		a.metricsLn = ln
-		a.metricsCtx, a.metricsStop = context.WithCancel(context.Background())
-		a.metricsDone = make(chan struct{})
-		grace := a.grace()
-		go func() {
-			defer close(a.metricsDone)
-			if err := a.metric.ServeMetrics(
-				a.metricsCtx, ln, grace,
-			); err != nil {
-				a.opts.Logger.Error("metrics server exited",
-					"addr", a.opts.MetricsAddr, "err", err)
-			}
-		}()
+		if err := a.serveMetricsOn(ln); err != nil {
+			_ = ln.Close()
+			_ = a.inbound.Shutdown(context.Background())
+			_ = a.out.Shutdown(context.Background())
+			return err
+		}
+		metricsSummary = fmt.Sprintf("tcp %s", a.opts.MetricsAddr)
+	case a.opts.MetricsVsockPort != 0:
+		vln, err := a.opts.VsockListenFn(a.opts.MetricsVsockPort)
+		if err != nil {
+			_ = a.inbound.Shutdown(context.Background())
+			_ = a.out.Shutdown(context.Background())
+			return fmt.Errorf(
+				"metrics vsock listen port %d: %w",
+				a.opts.MetricsVsockPort, err)
+		}
+		if err := a.serveMetricsOn(metrics.NewVsockNetListener(vln)); err != nil {
+			_ = vln.Close()
+			_ = a.inbound.Shutdown(context.Background())
+			_ = a.out.Shutdown(context.Background())
+			return err
+		}
+		metricsSummary = fmt.Sprintf(
+			"vsock port=%d", a.opts.MetricsVsockPort)
 	}
 	a.opts.Logger.Info("vsockd started",
 		"inbound_listeners", len(a.inbound.ListenerKeys()),
 		"outbound_ports", len(a.out.ListenerPorts()),
-		"metrics_addr", a.opts.MetricsAddr)
+		"metrics", metricsSummary)
+	return nil
+}
+
+// serveMetricsOn launches the /metrics HTTP goroutine over ln. The caller
+// owns ln on error; on success, Shutdown closes the listener through the
+// stored reference.
+func (a *App) serveMetricsOn(ln net.Listener) error {
+	a.metricsLn = ln
+	a.metricsCtx, a.metricsStop = context.WithCancel(context.Background())
+	a.metricsDone = make(chan struct{})
+	grace := a.grace()
+	go func() {
+		defer close(a.metricsDone)
+		if err := a.metric.ServeMetrics(
+			a.metricsCtx, ln, grace,
+		); err != nil {
+			a.opts.Logger.Error("metrics server exited", "err", err)
+		}
+	}()
 	return nil
 }
 
@@ -191,14 +244,14 @@ func (a *App) Reload() error {
 			"path", a.opts.ConfigPath, "err", err)
 		return err
 	}
-	inPlan, err := a.inbound.PrepareApply(cfg.Inbound)
+	inPlan, err := a.inbound.PrepareApply(cfg.Inbound, cfg.TCPToVsock)
 	if err != nil {
 		a.metric.ConfigReloads.
 			WithLabelValues(metrics.ReloadResultFailure).Inc()
 		a.opts.Logger.Error("inbound reload failed", "err", err)
 		return err
 	}
-	outPlan, err := a.out.PrepareApply(cfg.Outbound)
+	outPlan, err := a.out.PrepareApply(cfg.Outbound, cfg.VsockToTCP)
 	if err != nil {
 		inPlan.AbortApply()
 		a.metric.ConfigReloads.

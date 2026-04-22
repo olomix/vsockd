@@ -23,6 +23,11 @@ import (
 // stops errant hostnames from inflating the metric cardinality.
 const routeLabelUnknown = "unknown"
 
+// modeTCPToVsock is the internal mode tag for listeners constructed from
+// TCPToVsockListener config. Kept distinct from user-visible YAML mode
+// values so the listener type never collides with http-host/tls-sni.
+const modeTCPToVsock = "tcp_to_vsock"
+
 // sniffReadTimeout bounds how long a silent client can hold a slot before we
 // give up on extracting the Host header or SNI. The real upstream copy runs
 // without a deadline once the sniff completes.
@@ -59,10 +64,12 @@ type Server struct {
 	wg sync.WaitGroup
 }
 
-// NewServer wires a Server from the configured inbound listeners. The
-// listeners are not bound yet; Start performs the bind.
+// NewServer wires a Server from the configured HTTP-aware inbound listeners
+// and the raw tcp_to_vsock listeners. The sockets are not bound yet; Start
+// performs the bind.
 func NewServer(
-	listeners []config.InboundListener,
+	inbound []config.InboundListener,
+	tcpToVsock []config.TCPToVsockListener,
 	dialer vsockconn.Dialer,
 	m *metrics.Metrics,
 	logger *slog.Logger,
@@ -82,10 +89,17 @@ func NewServer(
 		logger:     logger,
 		activeConn: map[net.Conn]struct{}{},
 	}
-	for i := range listeners {
-		ln, err := newListener(listeners[i], s)
+	for i := range inbound {
+		ln, err := newHTTPListener(inbound[i], s)
 		if err != nil {
 			return nil, fmt.Errorf("inbound[%d]: %w", i, err)
+		}
+		s.listeners = append(s.listeners, ln)
+	}
+	for i := range tcpToVsock {
+		ln, err := newTCPToVsockListener(tcpToVsock[i], s)
+		if err != nil {
+			return nil, fmt.Errorf("tcp_to_vsock[%d]: %w", i, err)
 		}
 		s.listeners = append(s.listeners, ln)
 	}
@@ -181,7 +195,10 @@ type applySwap struct {
 // Splitting the work this way lets app.Reload stage both inbound and
 // outbound changes before committing either, so a partial reload cannot
 // leave the daemon in a half-new state when one subsystem's bind fails.
-func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error) {
+func (s *Server) PrepareApply(
+	inboundCfgs []config.InboundListener,
+	tcpCfgs []config.TCPToVsockListener,
+) (*ApplyPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -200,8 +217,9 @@ func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error)
 		existingByAddr[ln.addr()] = ln
 	}
 
-	kept := make(map[string]bool, len(cfgs))
-	next := make([]*listener, 0, len(cfgs))
+	total := len(inboundCfgs) + len(tcpCfgs)
+	kept := make(map[string]bool, total)
+	next := make([]*listener, 0, total)
 	var swaps []applySwap
 	var newBinds []*listener
 	cleanup := func() {
@@ -210,56 +228,72 @@ func (s *Server) PrepareApply(cfgs []config.InboundListener) (*ApplyPlan, error)
 		}
 	}
 
-	for i := range cfgs {
-		cfg := cfgs[i]
-		newLn, err := newListener(cfg, s)
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("inbound[%d]: %w", i, err)
-		}
+	apply := func(section string, i int, newLn *listener) error {
 		k := newLn.key()
 		if cur, ok := existing[k]; ok {
-			// For mode=tcp listeners there is no in-place swap of the vsock
-			// target today: handleTCP reads cur.targetCID/targetPort, which
-			// CommitApply never updates. Silently ignoring a target_cid /
-			// target_port edit would leave operators believing the reload
-			// took effect while traffic keeps flowing to the old enclave,
-			// so reject the reload loudly instead — mirroring the
-			// mode-change guard a few lines below.
-			if newLn.cfg.Mode == config.ModeTCP {
-				if cur.targetCID.Load() != newLn.cfg.TargetCID ||
-					cur.targetPort.Load() != newLn.cfg.TargetPort {
-					cleanup()
-					return nil, fmt.Errorf(
-						"inbound[%d]: cannot change target_cid/target_port on %s at runtime; restart required",
-						i, newLn.addr())
+			// For tcp_to_vsock listeners there is no in-place swap of the
+			// vsock target today: handleTCP reads cur.targetCID/targetPort,
+			// which CommitApply never updates. Silently ignoring a
+			// vsock_cid / vsock_port edit would leave operators believing
+			// the reload took effect while traffic keeps flowing to the old
+			// enclave, so reject the reload loudly instead — mirroring the
+			// mode-change guard below.
+			if newLn.mode == modeTCPToVsock {
+				if cur.targetCID.Load() != newLn.targetCID.Load() ||
+					cur.targetPort.Load() != newLn.targetPort.Load() {
+					return fmt.Errorf(
+						"%s[%d]: cannot change vsock_cid/vsock_port on %s at runtime; restart required",
+						section, i, newLn.addr())
 				}
 			}
-			// Key covers Bind, Port, and Mode — the only cfg fields the
+			// Key covers bind, port, and mode — the only fields the
 			// handle path reads — so we only need to swap the routes map.
-			// Leaving cur.cfg alone avoids a data race with accept-loop
-			// readers that don't take the server's mu.
+			// Leaving cur.routes for non-TCP listeners untouched avoids a
+			// data race with accept-loop readers that don't take the
+			// server's mu.
 			swaps = append(swaps, applySwap{cur, newLn.routesSnapshot()})
 			kept[k] = true
 			next = append(next, cur)
-			continue
+			return nil
 		}
 		// Same bind:port with a different mode: the old listener still
 		// owns the TCP socket, so net.Listen would fail with EADDRINUSE.
 		// Surface a clear error instead of that confusing system message;
 		// the operator can restart the daemon to apply the mode change.
 		if cur, addrMatch := existingByAddr[newLn.addr()]; addrMatch {
-			cleanup()
-			return nil, fmt.Errorf(
-				"inbound[%d]: cannot change mode on %s from %q to %q at runtime; restart required",
-				i, newLn.addr(), cur.cfg.Mode, newLn.cfg.Mode)
+			return fmt.Errorf(
+				"%s[%d]: cannot change mode on %s from %q to %q at runtime; restart required",
+				section, i, newLn.addr(), cur.mode, newLn.mode)
 		}
 		if err := newLn.bind(); err != nil {
-			cleanup()
-			return nil, err
+			return err
 		}
 		newBinds = append(newBinds, newLn)
 		next = append(next, newLn)
+		return nil
+	}
+
+	for i := range inboundCfgs {
+		newLn, err := newHTTPListener(inboundCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("inbound[%d]: %w", i, err)
+		}
+		if err := apply("inbound", i, newLn); err != nil {
+			cleanup()
+			return nil, err
+		}
+	}
+	for i := range tcpCfgs {
+		newLn, err := newTCPToVsockListener(tcpCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("tcp_to_vsock[%d]: %w", i, err)
+		}
+		if err := apply("tcp_to_vsock", i, newLn); err != nil {
+			cleanup()
+			return nil, err
+		}
 	}
 
 	return &ApplyPlan{
@@ -319,8 +353,11 @@ func (p *ApplyPlan) AbortApply() {
 // tests and any caller that doesn't need to coordinate with other
 // subsystems' reloads. Use PrepareApply/CommitApply for cross-subsystem
 // atomicity.
-func (s *Server) Apply(cfgs []config.InboundListener) error {
-	plan, err := s.PrepareApply(cfgs)
+func (s *Server) Apply(
+	inboundCfgs []config.InboundListener,
+	tcpCfgs []config.TCPToVsockListener,
+) error {
+	plan, err := s.PrepareApply(inboundCfgs, tcpCfgs)
 	if err != nil {
 		return err
 	}
@@ -378,44 +415,62 @@ func (s *Server) untrackConn(c net.Conn) {
 	s.connMu.Unlock()
 }
 
-// listener owns a single TCP accept loop for one InboundListener.
+// listener owns a single TCP accept loop for one HTTP-aware or
+// tcp_to_vsock listener. The mode field determines dispatch: "http-host"
+// and "tls-sni" take the sniff+route path; modeTCPToVsock takes handleTCP.
 type listener struct {
-	cfg    config.InboundListener
-	server *Server
-	tcp    net.Listener
+	bindAddr string
+	port     int
+	mode     string
+	server   *Server
+	tcp      net.Listener
 
 	// routes holds the lowercase-hostname → Route map. Stored as an atomic
 	// pointer so Apply can swap the whole table without blocking the hot
 	// path, and in-flight connections keep a stable reference to the map
-	// they observed at accept time. Unused for mode=tcp listeners.
+	// they observed at accept time. Unused for tcp_to_vsock listeners.
 	routes atomic.Pointer[map[string]config.Route]
 
-	// targetCID / targetPort hold the live vsock target for mode=tcp
+	// targetCID / targetPort hold the live vsock target for tcp_to_vsock
 	// listeners. Atomic types keep concurrent handleTCP reads race-free
 	// and leave room to introduce an in-place target swap the same way
 	// the outbound side swaps upstream — today a SIGHUP that changes
-	// target_cid or target_port on an already-bound inbound listener is
-	// rejected with a "restart required" error by PrepareApply, so these
-	// values never change for the lifetime of the listener.
+	// vsock_cid or vsock_port on an already-bound listener is rejected
+	// with a "restart required" error by PrepareApply, so these values
+	// never change for the lifetime of the listener.
 	// Unused for http-host/tls-sni listeners.
 	targetCID  atomic.Uint32
 	targetPort atomic.Uint32
 }
 
-func newListener(cfg config.InboundListener, s *Server) (*listener, error) {
+func newHTTPListener(cfg config.InboundListener, s *Server) (*listener, error) {
 	switch cfg.Mode {
-	case config.ModeHTTPHost, config.ModeTLSSNI, config.ModeTCP:
+	case config.ModeHTTPHost, config.ModeTLSSNI:
 	default:
 		return nil, fmt.Errorf("unknown mode %q", cfg.Mode)
 	}
-	l := &listener{cfg: cfg, server: s}
-	if cfg.Mode == config.ModeTCP {
-		l.targetCID.Store(cfg.TargetCID)
-		l.targetPort.Store(cfg.TargetPort)
-		return l, nil
+	l := &listener{
+		bindAddr: cfg.Bind,
+		port:     cfg.Port,
+		mode:     cfg.Mode,
+		server:   s,
 	}
 	rm := buildRouteMap(cfg.Routes)
 	l.routes.Store(&rm)
+	return l, nil
+}
+
+func newTCPToVsockListener(
+	cfg config.TCPToVsockListener, s *Server,
+) (*listener, error) {
+	l := &listener{
+		bindAddr: cfg.Bind,
+		port:     cfg.Port,
+		mode:     modeTCPToVsock,
+		server:   s,
+	}
+	l.targetCID.Store(cfg.VsockCID)
+	l.targetPort.Store(cfg.VsockPort)
 	return l, nil
 }
 
@@ -443,11 +498,11 @@ func (l *listener) replaceRoutes(rm map[string]config.Route) {
 // changing the sniff mode on the same (bind, port) semantically creates a
 // new listener (different protocol) even though the TCP address is shared.
 func (l *listener) key() string {
-	return fmt.Sprintf("%s|%s", l.addr(), l.cfg.Mode)
+	return fmt.Sprintf("%s|%s", l.addr(), l.mode)
 }
 
 func (l *listener) addr() string {
-	return net.JoinHostPort(l.cfg.Bind, strconv.Itoa(l.cfg.Port))
+	return net.JoinHostPort(l.bindAddr, strconv.Itoa(l.port))
 }
 
 func (l *listener) bind() error {
@@ -499,7 +554,7 @@ func (l *listener) run(ctx context.Context) {
 		l.server.wg.Add(1)
 		go func() {
 			defer l.server.wg.Done()
-			if l.cfg.Mode == config.ModeTCP {
+			if l.mode == modeTCPToVsock {
 				l.handleTCP(ctx, c)
 				return
 			}
@@ -520,7 +575,7 @@ func (l *listener) handle(ctx context.Context, c net.Conn) {
 		l.server.metric.InboundErrors.
 			WithLabelValues(routeLabelUnknown, metrics.InboundErrorSniff).Inc()
 		l.server.logger.Warn("inbound sniff failed",
-			"addr", l.addr(), "mode", l.cfg.Mode, "err", err)
+			"addr", l.addr(), "mode", l.mode, "err", err)
 		return
 	}
 
@@ -594,13 +649,13 @@ func (l *listener) dialUpstream(cid, port uint32) (net.Conn, error) {
 }
 
 func (l *listener) sniff(r io.Reader) (string, []byte, error) {
-	switch l.cfg.Mode {
+	switch l.mode {
 	case config.ModeHTTPHost:
 		return SniffHost(r)
 	case config.ModeTLSSNI:
 		return SniffSNI(r)
 	default:
-		return "", nil, fmt.Errorf("unknown mode %q", l.cfg.Mode)
+		return "", nil, fmt.Errorf("unknown mode %q", l.mode)
 	}
 }
 

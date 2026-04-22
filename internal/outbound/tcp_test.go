@@ -95,13 +95,13 @@ func findMessage(recs []logRecord, target string) logRecord {
 
 func startTCPServer(
 	t *testing.T,
-	cfgs []config.OutboundListener,
+	cfgs []config.VsockToTCPListener,
 	listenFn ListenFunc,
 	m *metrics.Metrics,
 	logger *slog.Logger,
 ) *Server {
 	t.Helper()
-	s, err := NewServer(cfgs, listenFn, m, logger)
+	s, err := NewServer(nil, cfgs, listenFn, m, logger)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -119,9 +119,9 @@ func startTCPServer(
 	return s
 }
 
-// TestTCP_Passthrough_RoundTrip verifies a TCP-mode outbound listener
-// shuttles bytes bidirectionally between the vsock peer and the TCP
-// upstream and captures accurate byte totals in the debug close log.
+// TestTCP_Passthrough_RoundTrip verifies a vsock_to_tcp listener shuttles
+// bytes bidirectionally between the vsock peer and the TCP upstream and
+// captures accurate byte totals in the debug close log.
 func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 	echo := startEchoServer(t)
 
@@ -133,9 +133,8 @@ func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: echo.Addr().String(),
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m, logger)
@@ -177,7 +176,7 @@ func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		closeLog = findMessage(
-			capH.records(t), "vsock connection closed")
+			capH.records(t), "vsock_to_tcp connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -200,7 +199,7 @@ func TestTCP_Passthrough_RoundTrip(t *testing.T) {
 		t.Errorf("cid = %v, want %v", got, enclaveCID)
 	}
 
-	openLog := findMessage(capH.records(t), "inbound vsock connection")
+	openLog := findMessage(capH.records(t), "vsock_to_tcp connection opened")
 	if openLog == nil {
 		t.Fatalf("open log not emitted")
 	}
@@ -232,9 +231,8 @@ func TestTCP_Passthrough_DialFailure(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: deadAddr,
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m, logger)
@@ -260,21 +258,21 @@ func TestTCP_Passthrough_DialFailure(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		recs := capH.records(t)
-		failLog = findMessage(recs, "outbound tcp dial failed")
-		closeLog = findMessage(recs, "vsock connection closed")
+		failLog = findMessage(recs, "vsock_to_tcp dial failed")
+		closeLog = findMessage(recs, "vsock_to_tcp connection closed")
 		if failLog != nil && closeLog != nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if failLog == nil {
-		t.Fatalf("expected 'outbound tcp dial failed' log")
+		t.Fatalf("expected 'vsock_to_tcp dial failed' log")
 	}
 	if got := failLog["upstream"]; got != deadAddr {
 		t.Errorf("upstream attr = %v, want %v", got, deadAddr)
 	}
 	if closeLog == nil {
-		t.Fatalf("expected 'vsock connection closed' log even on dial fail")
+		t.Fatalf("expected 'vsock_to_tcp connection closed' log even on dial fail")
 	}
 	// No bytes transferred → total_bytes must be zero.
 	if got := closeLog["total_bytes"]; got != float64(0) {
@@ -328,9 +326,8 @@ func TestTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	logger := slog.New(capH)
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: upstream.Addr().String(),
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m, logger)
@@ -363,7 +360,7 @@ func TestTCP_Passthrough_ClientDisconnectMidStream(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		closeLog = findMessage(
-			capH.records(t), "vsock connection closed")
+			capH.records(t), "vsock_to_tcp connection closed")
 		if closeLog != nil {
 			break
 		}
@@ -419,12 +416,11 @@ func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	const vsockPort uint32 = 8080
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: upstream.Addr().String(),
 	}}
-	s, err := NewServer(cfgs, newLoopbackListenFunc(reg, hostCID), m,
+	s, err := NewServer(nil, cfgs, newLoopbackListenFunc(reg, hostCID), m,
 		discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -471,13 +467,12 @@ func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 	}
 }
 
-// TestTCP_Passthrough_NewListenerAcceptsTCPConfig sanity-checks that the
-// direct constructor path builds a mode=tcp listener without going
+// TestTCP_Passthrough_NewListenerAcceptsVsockToTCP sanity-checks that the
+// direct constructor path builds a vsock_to_tcp listener without going
 // through config.Validate.
-func TestTCP_Passthrough_NewListenerAcceptsTCPConfig(t *testing.T) {
-	_, err := newListener(config.OutboundListener{
+func TestTCP_Passthrough_NewListenerAcceptsVsockToTCP(t *testing.T) {
+	_, err := newVsockToTCPListener(config.VsockToTCPListener{
 		Port:     8080,
-		Mode:     config.ModeTCP,
 		Upstream: "127.0.0.1:1",
 	}, &Server{})
 	if err != nil {
@@ -489,13 +484,12 @@ func TestTCP_Passthrough_NewListenerAcceptsTCPConfig(t *testing.T) {
 // the reload path hooks into — atomically publishes a new upstream
 // visible to subsequent upstreamSnapshot reads.
 func TestTCP_Passthrough_UpstreamSwap(t *testing.T) {
-	l, err := newListener(config.OutboundListener{
+	l, err := newVsockToTCPListener(config.VsockToTCPListener{
 		Port:     8080,
-		Mode:     config.ModeTCP,
 		Upstream: "127.0.0.1:1",
 	}, &Server{})
 	if err != nil {
-		t.Fatalf("newListener: %v", err)
+		t.Fatalf("newVsockToTCPListener: %v", err)
 	}
 	if got := l.upstreamSnapshot(); got != "127.0.0.1:1" {
 		t.Errorf("initial upstream = %q", got)
@@ -537,9 +531,9 @@ func waitForPlainCounter(t *testing.T, c prometheus.Counter, want float64) {
 		want, plainCounterValue(t, c))
 }
 
-// TestTCP_Passthrough_MetricsIncrement verifies the mode=tcp outbound
-// handler increments the new counters: one connection, byte totals
-// matching the echo round-trip, no error counters touched.
+// TestTCP_Passthrough_MetricsIncrement verifies the vsock_to_tcp handler
+// increments the counters: one connection, byte totals matching the echo
+// round-trip, no error counters touched.
 func TestTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	echo := startEchoServer(t)
 
@@ -548,9 +542,8 @@ func TestTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	const vsockPort uint32 = 8080
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: echo.Addr().String(),
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m,
@@ -577,16 +570,16 @@ func TestTCP_Passthrough_MetricsIncrement(t *testing.T) {
 	// Connections counter records one accept even though the dial and the
 	// close happen asynchronously; bytes are incremented after both
 	// shuttle directions finish, so poll on those.
-	waitForPlainCounter(t, m.TCPOutboundConnections, 1)
-	waitForCounter(t, m.TCPOutboundBytes, float64(len(payload)),
+	waitForPlainCounter(t, m.VsockToTCPConnections, 1)
+	waitForCounter(t, m.VsockToTCPBytes, float64(len(payload)),
 		metrics.DirectionUp)
-	waitForCounter(t, m.TCPOutboundBytes, float64(len(payload)),
+	waitForCounter(t, m.VsockToTCPBytes, float64(len(payload)),
 		metrics.DirectionDown)
 
-	if got := counterValue(t, m.TCPOutboundErrors, metrics.TCPErrorDial); got != 0 {
+	if got := counterValue(t, m.VsockToTCPErrors, metrics.TCPErrorDial); got != 0 {
 		t.Errorf("dial error counter = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPOutboundErrors, metrics.TCPErrorCopy); got != 0 {
+	if got := counterValue(t, m.VsockToTCPErrors, metrics.TCPErrorCopy); got != 0 {
 		t.Errorf("copy error counter = %v, want 0", got)
 	}
 }
@@ -607,9 +600,8 @@ func TestTCP_Passthrough_MetricsDialFail(t *testing.T) {
 	const vsockPort uint32 = 8080
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: deadAddr,
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m,
@@ -625,13 +617,13 @@ func TestTCP_Passthrough_MetricsDialFail(t *testing.T) {
 	_, _ = c.Read(buf)
 	_ = c.Close()
 
-	waitForPlainCounter(t, m.TCPOutboundConnections, 1)
-	waitForCounter(t, m.TCPOutboundErrors, 1, metrics.TCPErrorDial)
+	waitForPlainCounter(t, m.VsockToTCPConnections, 1)
+	waitForCounter(t, m.VsockToTCPErrors, 1, metrics.TCPErrorDial)
 
-	if got := counterValue(t, m.TCPOutboundBytes, metrics.DirectionUp); got != 0 {
+	if got := counterValue(t, m.VsockToTCPBytes, metrics.DirectionUp); got != 0 {
 		t.Errorf("DirectionUp bytes = %v, want 0", got)
 	}
-	if got := counterValue(t, m.TCPOutboundBytes, metrics.DirectionDown); got != 0 {
+	if got := counterValue(t, m.VsockToTCPBytes, metrics.DirectionDown); got != 0 {
 		t.Errorf("DirectionDown bytes = %v, want 0", got)
 	}
 }
@@ -648,9 +640,8 @@ func TestTCP_Passthrough_ConcurrentConnections(t *testing.T) {
 	const vsockPort uint32 = 8080
 
 	m := metrics.New()
-	cfgs := []config.OutboundListener{{
+	cfgs := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: echo.Addr().String(),
 	}}
 	startTCPServer(t, cfgs, newLoopbackListenFunc(reg, hostCID), m,
@@ -691,13 +682,13 @@ func TestTCP_Passthrough_ConcurrentConnections(t *testing.T) {
 	wg.Wait()
 }
 
-// TestTCP_Passthrough_ApplyModeChangeRejected verifies that flipping an
-// outbound listener between HTTP forward-proxy mode and TCP passthrough on
-// the same port via Apply/SIGHUP is refused with a descriptive error and
-// leaves the running listener intact. Silently accepting this reload would
-// leave run() dispatching on the stale cfg.Mode while the swap wipes the
-// matcher table — denying every subsequent connection with no operator
-// signal.
+// TestTCP_Passthrough_ApplyModeChangeRejected verifies that swapping a
+// port between the HTTP forward-proxy (outbound) and raw passthrough
+// (vsock_to_tcp) sections via Apply/SIGHUP is refused with a descriptive
+// error and leaves the running listener intact. Silently accepting this
+// reload would leave run() dispatching on the stale mode while the swap
+// wipes the matcher table — denying every subsequent connection with no
+// operator signal.
 func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
 	reg := vsockconn.NewRegistry()
 	const vsockPort uint32 = 8080
@@ -711,12 +702,11 @@ func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
 	}}
 	s := startServer(t, httpCfg, newLoopbackListenFunc(reg, hostCID), m)
 
-	tcpCfg := []config.OutboundListener{{
+	tcpCfg := []config.VsockToTCPListener{{
 		Port:     vsockPort,
-		Mode:     config.ModeTCP,
 		Upstream: "127.0.0.1:9",
 	}}
-	err := s.Apply(tcpCfg)
+	err := s.Apply(nil, tcpCfg)
 	if err == nil {
 		t.Fatal("Apply with changed mode returned nil, want error")
 	}
@@ -730,9 +720,9 @@ func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
 	if len(s.listeners) != 1 {
 		t.Fatalf("listeners len = %d, want 1", len(s.listeners))
 	}
-	if s.listeners[0].cfg.Mode != "" {
+	if s.listeners[0].mode != modeHTTPProxy {
 		t.Fatalf("listener mode = %q; want original HTTP mode preserved",
-			s.listeners[0].cfg.Mode)
+			s.listeners[0].mode)
 	}
 	if got := s.listeners[0].matchersSnapshot(); len(got) != 1 {
 		t.Fatalf("matcher table size = %d; want 1 (original CID preserved)",

@@ -45,10 +45,10 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 
 	peerCID := c.PeerCID()
 	peerPort := c.PeerPort()
-	listenPort := l.cfg.Port
+	listenPort := l.port
 
-	l.server.metric.TCPOutboundConnections.Inc()
-	l.server.logger.Debug("inbound vsock connection",
+	l.server.metric.VsockToTCPConnections.Inc()
+	l.server.logger.Debug("vsock_to_tcp connection opened",
 		"cid", peerCID,
 		"port", peerPort,
 		"listen_port", listenPort)
@@ -64,16 +64,16 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 		// warn-level log so shutdown does not look like an incident.
 		shutdownCancel := l.server.dialCtx.Err() != nil
 		if !shutdownCancel {
-			l.server.metric.TCPOutboundErrors.
+			l.server.metric.VsockToTCPErrors.
 				WithLabelValues(metrics.TCPErrorDial).Inc()
-			l.server.logger.Warn("outbound tcp dial failed",
+			l.server.logger.Warn("vsock_to_tcp dial failed",
 				"cid", peerCID,
 				"port", peerPort,
 				"listen_port", listenPort,
 				"upstream", upstreamAddr,
 				"err", err)
 		}
-		l.server.logger.Debug("vsock connection closed",
+		l.server.logger.Debug("vsock_to_tcp connection closed",
 			"cid", peerCID,
 			"port", peerPort,
 			"listen_port", listenPort,
@@ -86,16 +86,16 @@ func (l *listener) handleTCP(ctx context.Context, c vsockconn.Conn, upstreamAddr
 
 	upBytes, downBytes, copyErrored := shuttleTCP(c, upstream)
 
-	l.server.metric.TCPOutboundBytes.
+	l.server.metric.VsockToTCPBytes.
 		WithLabelValues(metrics.DirectionUp).Add(float64(upBytes))
-	l.server.metric.TCPOutboundBytes.
+	l.server.metric.VsockToTCPBytes.
 		WithLabelValues(metrics.DirectionDown).Add(float64(downBytes))
 	if copyErrored {
-		l.server.metric.TCPOutboundErrors.
+		l.server.metric.VsockToTCPErrors.
 			WithLabelValues(metrics.TCPErrorCopy).Inc()
 	}
 
-	l.server.logger.Debug("vsock connection closed",
+	l.server.logger.Debug("vsock_to_tcp connection closed",
 		"cid", peerCID,
 		"port", peerPort,
 		"listen_port", listenPort,

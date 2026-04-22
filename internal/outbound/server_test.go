@@ -55,7 +55,7 @@ func startServer(
 	m *metrics.Metrics,
 ) *Server {
 	t.Helper()
-	s, err := NewServer(cfgs, listenFn, m, discardLogger())
+	s, err := NewServer(cfgs, nil, listenFn, m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -697,11 +697,11 @@ func TestNewServerRejectsNilDependencies(t *testing.T) {
 	reg := vsockconn.NewRegistry()
 	listenFn := newLoopbackListenFunc(reg, hostCID)
 
-	if _, err := NewServer(nil, nil, metrics.New(),
+	if _, err := NewServer(nil, nil, nil, metrics.New(),
 		discardLogger()); err == nil {
 		t.Error("expected error on nil listen func")
 	}
-	if _, err := NewServer(nil, listenFn, nil,
+	if _, err := NewServer(nil, nil, listenFn, nil,
 		discardLogger()); err == nil {
 		t.Error("expected error on nil metrics")
 	}
@@ -720,6 +720,7 @@ func TestNewServerRejectsDuplicateCID(t *testing.T) {
 				{CID: 16, AllowedHosts: []string{"*"}},
 			},
 		}},
+		nil,
 		newLoopbackListenFunc(reg, hostCID),
 		metrics.New(),
 		discardLogger(),
@@ -744,6 +745,7 @@ func TestNewServerRejectsBadAllowlist(t *testing.T) {
 				AllowedHosts: []string{"not-a-pattern"},
 			}},
 		}},
+		nil,
 		newLoopbackListenFunc(reg, hostCID),
 		metrics.New(),
 		discardLogger(),
@@ -763,7 +765,7 @@ func TestServerShutdownGraceful(t *testing.T) {
 			CID: 16, AllowedHosts: []string{"*"},
 		}},
 	}}
-	s, err := NewServer(cfgs, newLoopbackListenFunc(reg, hostCID),
+	s, err := NewServer(cfgs, nil, newLoopbackListenFunc(reg, hostCID),
 		m, discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -801,6 +803,7 @@ func TestStartBindConflict(t *testing.T) {
 				CID: 16, AllowedHosts: []string{"*"},
 			}},
 		}},
+		nil,
 		newLoopbackListenFunc(reg, hostCID),
 		metrics.New(),
 		discardLogger(),
