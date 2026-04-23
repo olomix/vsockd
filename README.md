@@ -116,41 +116,22 @@ the `-metrics-addr` flag.
 
 ### systemd unit
 
-```ini
-# /etc/systemd/system/vsockd.service
-[Unit]
-Description=vsockd — Nitro Enclave vsock proxy
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/vsockd -config /etc/vsockd/vsockd.yaml
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=2
-User=vsockd
-Group=vsockd
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`CAP_NET_BIND_SERVICE` lets the non-root `vsockd` user bind to ports 80 and
-443. The kernel's `AF_VSOCK` support is required on the host (standard on
-Nitro-capable instance types).
+A hardened example unit lives at
+[`examples/vsockd.service`](examples/vsockd.service). Install it with:
 
 ```sh
+sudo install -m 0644 examples/vsockd.service /etc/systemd/system/vsockd.service
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin vsockd
 sudo systemctl daemon-reload
 sudo systemctl enable --now vsockd
 ```
+
+`CAP_NET_BIND_SERVICE` lets the non-root `vsockd` user bind to ports 80
+and 443. The unit sets `TimeoutStopSec=35s` so systemd does not SIGKILL
+the process inside the default 30 s `shutdown_grace` drain window —
+bump both together if you raise `shutdown_grace` in YAML. The kernel's
+`AF_VSOCK` support is required on the host (standard on Nitro-capable
+instance types).
 
 ## Configuration
 
