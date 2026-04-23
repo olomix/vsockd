@@ -133,26 +133,26 @@ in-flight retry timer does not delay exit by up to a second.
 
 ### Task 2: Add per-listener done signal in outbound accept loop
 
-- [ ] Add `closeOnce sync.Once` and `done chan struct{}` fields to the
+- [x] Add `closeOnce sync.Once` and `done chan struct{}` fields to the
       `listener` struct in `internal/outbound/server.go`. Document why
       this is needed (the `mdlayher/vsock` rewrap behaviour) in the struct
       comment.
-- [ ] Initialise `done: make(chan struct{})` in both `newHTTPListener` and
+- [x] Initialise `done: make(chan struct{})` in both `newHTTPListener` and
       `newVsockToTCPListener`.
-- [ ] Replace the body of `listener.close()` with a `closeOnce.Do` wrapper
+- [x] Replace the body of `listener.close()` with a `closeOnce.Do` wrapper
       that closes `l.done` and then closes `l.ln` (keep the `l.ln != nil`
       guard). Double-close of `close()` becomes safe.
-- [ ] In `listener.run`, after Accept returns a non-nil error, first
+- [x] In `listener.run`, after Accept returns a non-nil error, first
       `select { case <-l.done: return; default: }` before the existing
       `ctx.Err()` / `errors.Is` check. Keep the existing check as
       defence-in-depth.
-- [ ] In the backoff `select` (same function), add `case <-l.done:
+- [x] In the backoff `select` (same function), add `case <-l.done:
       return` so a pending retry timer does not delay exit by up to a
       second.
-- [ ] Run `go test ./internal/outbound/ -run
+- [x] Run `go test ./internal/outbound/ -run
       TestServerShutdownHandlesNonErrClosedAcceptError` — must **pass**.
-- [ ] Run `go test ./...` — all packages must pass.
-- [ ] Run `go vet ./...` and the project linter if present; fix any
+- [x] Run `go test ./...` — all packages must pass.
+- [x] Run `go vet ./...` and the project linter if present; fix any
       warnings.
 
 ### Task 3: Add example systemd unit

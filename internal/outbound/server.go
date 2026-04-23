@@ -436,6 +436,18 @@ type listener struct {
 
 	ln vsockconn.Listener
 
+	// done is closed exactly once by close() and is the authoritative
+	// "this listener is intentionally torn down" signal for the accept
+	// loop. We cannot rely on Accept's error alone: mdlayher/vsock v1.2.1
+	// rewraps every closed-FD error (EBADF, os.ErrClosed, poller "use of
+	// closed file") as a fresh errors.New("use of closed network
+	// connection"). The string matches net.ErrClosed's message but the
+	// value does not, so errors.Is(err, net.ErrClosed) returns false and
+	// the accept loop would otherwise treat the error as transient and
+	// spin forever. closeOnce guards against double-close of done/ln.
+	closeOnce sync.Once
+	done      chan struct{}
+
 	// matchers holds the authorized-CID → compiled allowlist table. Stored
 	// as an atomic pointer so Apply can swap the whole table at reload
 	// time without disturbing in-flight connections. Only populated for
@@ -451,7 +463,12 @@ type listener struct {
 func newHTTPListener(
 	cfg config.OutboundListener, s *Server,
 ) (*listener, error) {
-	l := &listener{port: cfg.Port, mode: modeHTTPProxy, server: s}
+	l := &listener{
+		port:   cfg.Port,
+		mode:   modeHTTPProxy,
+		server: s,
+		done:   make(chan struct{}),
+	}
 	if len(cfg.CIDs) == 0 {
 		return nil, fmt.Errorf("port %d: no cids configured", cfg.Port)
 	}
@@ -475,7 +492,12 @@ func newHTTPListener(
 func newVsockToTCPListener(
 	cfg config.VsockToTCPListener, s *Server,
 ) (*listener, error) {
-	l := &listener{port: cfg.Port, mode: modeVsockToTCP, server: s}
+	l := &listener{
+		port:   cfg.Port,
+		mode:   modeVsockToTCP,
+		server: s,
+		done:   make(chan struct{}),
+	}
 	u := cfg.Upstream
 	l.upstream.Store(&u)
 	return l, nil
@@ -522,9 +544,12 @@ func (l *listener) bind() error {
 }
 
 func (l *listener) close() {
-	if l.ln != nil {
-		_ = l.ln.Close()
-	}
+	l.closeOnce.Do(func() {
+		close(l.done)
+		if l.ln != nil {
+			_ = l.ln.Close()
+		}
+	})
 }
 
 func (l *listener) run(ctx context.Context) {
@@ -535,6 +560,14 @@ func (l *listener) run(ctx context.Context) {
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
+			// l.done is the authoritative shutdown signal; check it before
+			// the error-shape checks because mdlayher/vsock's opError
+			// rewrap hides net.ErrClosed behind a non-matching value.
+			select {
+			case <-l.done:
+				return
+			default:
+			}
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
@@ -551,6 +584,8 @@ func (l *listener) run(ctx context.Context) {
 			select {
 			case <-time.After(tempDelay):
 			case <-ctx.Done():
+				return
+			case <-l.done:
 				return
 			}
 			continue
