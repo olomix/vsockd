@@ -157,7 +157,7 @@ in-flight retry timer does not delay exit by up to a second.
 
 ### Task 3: Add example systemd unit
 
-- [ ] Create `examples/vsockd.service` with:
+- [x] Create `examples/vsockd.service` with:
   - `Type=simple`, `ExecStart=/usr/local/bin/vsockd -config
     /etc/vsockd/vsockd.yaml`, `ExecReload=/bin/kill -HUP $MAINPID`.
   - `TimeoutStopSec=35s` with a comment explaining it must be ≥
@@ -187,7 +187,7 @@ in-flight retry timer does not delay exit by up to a second.
   - Comment at top linking to `examples/vsockd.yaml` and noting the unit
     is an example — operators should adapt paths, user, and hardening to
     their environment.
-- [ ] No tests (static config file). Skip the "run tests" checkbox for
+- [x] No tests (static config file). Skip the "run tests" checkbox for
       this task.
 
 ### Task 4: Verify acceptance criteria
