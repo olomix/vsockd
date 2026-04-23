@@ -3,6 +3,7 @@ package outbound
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -839,5 +841,91 @@ func TestStripHopByHop(t *testing.T) {
 	}
 	if got := h.Get("X-Custom"); got != "keep-me" {
 		t.Errorf("X-Custom = %q, want keep-me", got)
+	}
+}
+
+// hangingListener mimics the shutdown behaviour of mdlayher/vsock v1.2.1:
+// after Close it returns an error whose string matches net.ErrClosed but
+// whose value does not (errors.Is returns false). Used to reproduce the
+// outbound-shutdown spin-loop bug without a real AF_VSOCK socket.
+type hangingListener struct {
+	accept chan error
+	closed atomic.Bool
+	addr   net.Addr
+}
+
+func newHangingListener() *hangingListener {
+	return &hangingListener{
+		accept: make(chan error, 1),
+		addr:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0},
+	}
+}
+
+func (h *hangingListener) Accept() (vsockconn.Conn, error) {
+	err, ok := <-h.accept
+	if !ok {
+		return nil, errors.New("use of closed network connection")
+	}
+	return nil, err
+}
+
+func (h *hangingListener) Close() error {
+	if h.closed.CompareAndSwap(false, true) {
+		// mdlayher/vsock v1.2.1 opError wraps the close-side error as a
+		// freshly constructed errors.New with this exact message, so the
+		// string matches net.ErrClosed but errors.Is does not.
+		h.accept <- errors.New("use of closed network connection")
+		close(h.accept)
+	}
+	return nil
+}
+
+func (h *hangingListener) Addr() net.Addr { return h.addr }
+
+// TestServerShutdownHandlesNonErrClosedAcceptError reproduces the bug
+// where Shutdown spins forever because the outbound accept loop does not
+// recognise mdlayher/vsock's rewrapped close error as net.ErrClosed.
+// Pre-fix, Shutdown hangs until its ctx deadline and the test times out.
+// Post-fix, Shutdown returns nil well inside the 500 ms budget because
+// the per-listener done channel signals the accept loop to exit.
+func TestServerShutdownHandlesNonErrClosedAcceptError(t *testing.T) {
+	hanging := newHangingListener()
+	listenFn := func(port uint32) (vsockconn.Listener, error) {
+		return hanging, nil
+	}
+	cfgs := []config.OutboundListener{{
+		Port: 8080,
+		CIDs: []config.OutboundCID{{
+			CID: 16, AllowedHosts: []string{"*"},
+		}},
+	}}
+	s, err := NewServer(cfgs, nil, listenFn, metrics.New(), discardLogger())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Run Shutdown off the test goroutine: pre-fix, Shutdown blocks
+	// indefinitely on its internal <-done because the accept loop never
+	// exits. Without this goroutine the whole test would hang until the
+	// package test timeout rather than fail with a useful message.
+	errCh := make(chan error, 1)
+	start := time.Now()
+	go func() { errCh <- s.Shutdown(shutdownCtx) }()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Shutdown: %v (elapsed %s)", err, time.Since(start))
+		}
+		if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+			t.Fatalf("Shutdown took %s; want well under 500ms", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Shutdown did not return within 2s; accept loop spinning on non-ErrClosed error")
 	}
 }

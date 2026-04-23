@@ -114,21 +114,21 @@ in-flight retry timer does not delay exit by up to a second.
 
 ### Task 1: Add failing regression test for vsock-style close error
 
-- [ ] Add `TestServerShutdownHandlesNonErrClosedAcceptError` to
+- [x] Add `TestServerShutdownHandlesNonErrClosedAcceptError` to
       `internal/outbound/server_test.go`. The test wires a fake
       `vsockconn.Listener` whose `Accept` returns a plain
       `errors.New("use of closed network connection")` after `Close` —
       mirroring `mdlayher/vsock`'s `opError` rewrap.
-- [ ] Test starts the server with this fake listener, then calls
+- [x] Test starts the server with this fake listener, then calls
       `Shutdown` with a 500 ms timeout and asserts it returns `nil` well
       inside that bound.
-- [ ] Factor the fake into a small helper type in the same test file; keep
+- [x] Factor the fake into a small helper type in the same test file; keep
       it minimal (Accept, Close, Addr, plus PeerCID on the Conn).
-- [ ] Run `go test ./internal/outbound/ -run
+- [x] Run `go test ./internal/outbound/ -run
       TestServerShutdownHandlesNonErrClosedAcceptError` — must **fail**
       (hang up to the test timeout) before Task 2. That failure is the
       evidence the fix is needed.
-- [ ] Confirm the rest of `go test ./internal/outbound/...` still passes
+- [x] Confirm the rest of `go test ./internal/outbound/...` still passes
       (no regressions introduced by the fake).
 
 ### Task 2: Add per-listener done signal in outbound accept loop
