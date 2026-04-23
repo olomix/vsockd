@@ -192,19 +192,19 @@ in-flight retry timer does not delay exit by up to a second.
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] `go test ./...` passes.
-- [ ] `go vet ./...` clean.
-- [ ] Manual read of the diff: the `closeOnce` / `done` fields are
+- [x] `go test ./...` passes.
+- [x] `go vet ./...` clean.
+- [x] Manual read of the diff: the `closeOnce` / `done` fields are
       documented, the accept loop changes are minimal, and no unrelated
       code moved.
-- [ ] Confirm via code inspection that Reload (`PrepareApply` →
+- [x] Confirm via code inspection that Reload (`PrepareApply` →
       `CommitApply`) still works: removed listeners get `close()`, their
       goroutines now exit via `l.done` without waiting for a
       never-matching error. New listeners get a fresh `done` channel at
       construction.
-- [ ] Confirm the systemd unit's `TimeoutStopSec` ≥
+- [x] Confirm the systemd unit's `TimeoutStopSec` ≥
       `examples/vsockd.yaml`'s `shutdown_grace`.
-- [ ] Build a local binary and sanity-check that `-version` still works:
+- [x] Build a local binary and sanity-check that `-version` still works:
       `go run ./cmd/vsockd -version`.
 
 ## Technical Details
