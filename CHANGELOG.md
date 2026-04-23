@@ -24,6 +24,21 @@ metrics listener — old configs fail loudly at startup.
 - `metrics.vsock_port` — expose `/metrics` over vsock
   (`VMADDR_CID_ANY`) so an enclave-side vsockd can be scraped from the
   parent host. Mutually exclusive with `metrics.bind`.
+- `examples/vsockd.service` — hardened example systemd unit. Matches
+  `examples/vsockd.yaml` and sets `TimeoutStopSec=35s` to cover the
+  default 30 s `shutdown_grace`.
+
+### Fixed
+
+- Outbound listeners no longer spin in the accept loop during shutdown
+  or SIGHUP reload when a listener is removed. `mdlayher/vsock` v1.2.1
+  rewraps the close-side error as a non-`net.ErrClosed` value whose
+  message matches but whose `errors.Is` identity does not, so the loop
+  treated the close as a transient error. A per-listener `done` channel
+  now drives teardown independently of the Accept error shape. Before
+  the fix, `SIGTERM` / `SIGINT` would hang indefinitely on configs with
+  any outbound or `vsock_to_tcp` listener and only `SIGKILL` terminated
+  the process.
 
 ### Changed
 
