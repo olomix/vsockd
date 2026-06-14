@@ -191,7 +191,7 @@ inject host fields per record.
 
 ### Task 2: Add `log_relay` listener mode, sink, and enrichment to outbound
 
-- [ ] write tests first (`internal/outbound/logrelay_test.go`) using the
+- [x] write tests first (`internal/outbound/logrelay_test.go`) using the
       loopback harness with a known peer CID: send several NDJSON object lines
       and assert each output line has `"cid":<peer>` and the host-tags object
       under the configured key spliced in while all original fields/bytes are
@@ -205,31 +205,33 @@ inject host fields per record.
       dial a stdout listener and assert output reaches the injected writer;
       assert serial handling (second dial waits); assert Shutdown force-closes
       an in-flight relay within grace.
-- [ ] add `modeLogRelay = "log_relay"` constant in
+- [x] add `modeLogRelay = "log_relay"` constant in
       `internal/outbound/server.go`.
-- [ ] define a `sink` (`io.Writer` + `Close() error`; stdout's Close is a
+- [x] define a `sink` (`io.Writer` + `Close() error`; stdout's Close is a
       no-op) and `openSink(cfg) (sink, error)` — `os.OpenFile(path,
       O_APPEND|O_CREATE|O_WRONLY, 0o640)` for file, an un-closing `os.Stdout`
-      wrapper for stdout (target injectable for tests).
-- [ ] define enrichment: precompute, per connection, the host prefix bytes
+      wrapper for stdout (target injectable via the package-level
+      `stdoutSinkWriter` seam for tests).
+- [x] define enrichment: precompute, per connection, the host prefix bytes
       (`"cid":N,"<host_key>":{…},`) from the listener's enrich config (incl. the
       configured `host_key`) + the conn's `PeerCID()`; an `enrichLine(dst,
       line)` that splices the prefix into a valid JSON object (empty-object
       aware) or wraps a non-object/over-long line as a `raw` record. The
       enclave's `tags` are never read or modified — host data is additive only.
-- [ ] add `sink atomic.Pointer[sink]` and `enrich atomic.Pointer[enrichConfig]`
+- [x] add `sink atomic.Pointer[sink]` and `enrich atomic.Pointer[enrichConfig]`
       to the `listener` struct; `newLogRelayListener(cfg, s)` opens the sink and
       stores both.
-- [ ] extend `NewServer` to accept `[]config.LogRelayListener`, build these
+- [x] extend `NewServer` to accept `[]config.LogRelayListener`, build these
       listeners, and update its signature + the `app.New` call site in
       `internal/app/app.go` (`outbound.NewServer(..., opts.Config.LogRelay)`).
-- [ ] dispatch `modeLogRelay` in the accept loop to `handleLogRelay`, handled
+- [x] dispatch `modeLogRelay` in the accept loop to `handleLogRelay`, handled
       **serially** per decision 4, with a comment explaining the rationale.
-- [ ] implement `handleLogRelay` (`internal/outbound/logrelay.go`): track the
+- [x] implement `handleLogRelay` (`internal/outbound/logrelay.go`): track the
       conn; `bufio` line reader bounded by `max_line_bytes`; per line, enrich
-      and write to the current sink; count bytes/lines/errors; close conn on
-      return. No upstream dial.
-- [ ] run `go test ./internal/outbound/... ./internal/app/...` — must pass
+      and write to the current sink; close conn on return. No upstream dial.
+      (Byte/line/error metric counting is deferred to Task 3, which adds the
+      metric fields.)
+- [x] run `go test ./internal/outbound/... ./internal/app/...` — must pass
       before Task 3.
 
 ### Task 3: Add `log_relay` metrics

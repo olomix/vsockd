@@ -48,11 +48,14 @@ const (
 
 // modeHTTPProxy labels listeners derived from config.OutboundListener
 // (the HTTP forward-proxy path). modeVsockToTCP labels listeners derived
-// from config.VsockToTCPListener (raw passthrough). These are internal
-// sentinels, not user-visible YAML values.
+// from config.VsockToTCPListener (raw passthrough). modeLogRelay labels
+// listeners derived from config.LogRelayListener (line-aware NDJSON sink
+// with host enrichment). These are internal sentinels, not user-visible
+// YAML values.
 const (
-	modeHTTPProxy   = ""
-	modeVsockToTCP  = "vsock_to_tcp"
+	modeHTTPProxy  = ""
+	modeVsockToTCP = "vsock_to_tcp"
+	modeLogRelay   = "log_relay"
 )
 
 // ListenFunc opens a vsock-style Listener on the given port. Production
@@ -96,6 +99,7 @@ type Server struct {
 func NewServer(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 	listenFn ListenFunc,
 	m *metrics.Metrics,
 	logger *slog.Logger,
@@ -130,7 +134,28 @@ func NewServer(
 		}
 		s.listeners = append(s.listeners, ln)
 	}
+	for i := range logRelayCfgs {
+		ln, err := newLogRelayListener(logRelayCfgs[i], s)
+		if err != nil {
+			// A log_relay listener opens its file sink at construction, so an
+			// error on a later listener must not leak the fds opened by the
+			// earlier ones in this same call.
+			s.closeLogRelaySinks()
+			return nil, fmt.Errorf("log_relay[%d]: %w", i, err)
+		}
+		s.listeners = append(s.listeners, ln)
+	}
 	return s, nil
+}
+
+// closeLogRelaySinks closes the sink of every log_relay listener built so
+// far. Used to roll back partially-constructed servers without leaking fds.
+func (s *Server) closeLogRelaySinks() {
+	for _, ln := range s.listeners {
+		if ln.mode == modeLogRelay {
+			ln.closeSink()
+		}
+	}
 }
 
 // Addr returns the bound address of the i-th configured listener, or nil
@@ -458,6 +483,15 @@ type listener struct {
 	// listeners. Atomic so SIGHUP reloads can swap the destination without
 	// tearing down the vsock accept loop. Unused for HTTP-proxy listeners.
 	upstream atomic.Pointer[string]
+
+	// sink and enrich hold the live log_relay sink and enrichment config.
+	// Both are atomic so a SIGHUP reload can swap them for new connections
+	// while an in-flight relay keeps the ones it started with (plan
+	// decision 9). Only populated for log_relay listeners. maxLineBytes
+	// bounds a single relayed NDJSON line.
+	sink         atomic.Pointer[sink]
+	enrich       atomic.Pointer[enrichConfig]
+	maxLineBytes int
 }
 
 func newHTTPListener(
@@ -549,6 +583,9 @@ func (l *listener) close() {
 		if l.ln != nil {
 			_ = l.ln.Close()
 		}
+		// Release the file fd for a log_relay listener being torn down
+		// (shutdown or reload-removal). stdout sinks have a no-op Close.
+		l.closeSink()
 	})
 }
 
@@ -606,6 +643,15 @@ func (l *listener) run(ctx context.Context) {
 		var tcpUpstream string
 		if l.mode == modeVsockToTCP {
 			tcpUpstream = l.upstreamSnapshot()
+		}
+		if l.mode == modeLogRelay {
+			// Serial per listener (plan decision 4): handle inline so the
+			// accept loop processes one connection at a time. A single
+			// supervisor producer makes this the simplest correct design
+			// (one scanner, no sink write-side locking). This runs inside
+			// run()'s already-tracked goroutine, so no extra wg.Add.
+			l.handleLogRelay(ctx, c)
+			continue
 		}
 		l.server.wg.Add(1)
 		go func() {
