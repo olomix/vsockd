@@ -13,6 +13,7 @@ coverage.out
 
 # Build outputs
 /vsockd
+/supervisor
 /dist/
 
 # Editors / OS

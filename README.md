@@ -112,7 +112,7 @@ libc) and has no external runtime dependencies.
 ```sh
 git clone https://github.com/olomix/vsockd.git
 cd vsockd
-make build          # produces ./vsockd
+make build          # produces ./vsockd and ./supervisor
 sudo install -m 0755 vsockd /usr/local/bin/vsockd
 sudo install -d -m 0755 /etc/vsockd
 sudo install -m 0644 examples/vsockd.yaml /etc/vsockd/vsockd.yaml
@@ -580,8 +580,9 @@ See [`examples/supervisor.yaml`](examples/supervisor.yaml) for a fully
 annotated config (a `task` app + a vsockd `sidecar`, `log_port` matching the
 `log_relay` example above). The schema is in `internal/supervisor/config.go`.
 
-The `supervisor` binary is separate from `vsockd` and is not produced by
-`make build`. Build it directly:
+The `supervisor` binary is separate from `vsockd` but is built alongside it
+by `make build`, which produces both `./vsockd` and `./supervisor` (and
+`make clean` removes both). To build only the supervisor directly:
 
 ```
 CGO_ENABLED=0 go build -o supervisor ./cmd/supervisor
@@ -707,7 +708,7 @@ are ever used as label values.
 make test           # go test ./...
 make vet            # go vet ./...
 make lint           # staticcheck ./...
-make build          # static binary
+make build          # static binaries (vsockd + supervisor)
 make docker         # container image
 ```
 

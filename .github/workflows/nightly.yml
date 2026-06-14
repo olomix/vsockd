@@ -75,15 +75,19 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags "-s -w" \
             -o "dist/vsockd-linux-${GOARCH}" ./cmd/vsockd
+          go build -trimpath -ldflags "-s -w" \
+            -o "dist/supervisor-linux-${GOARCH}" ./cmd/supervisor
 
       - name: Checksum
         working-directory: dist
-        run: sha256sum "vsockd-linux-${{ matrix.goarch }}" > "vsockd-linux-${{ matrix.goarch }}.sha256"
+        run: |
+          sha256sum "vsockd-linux-${{ matrix.goarch }}" > "vsockd-linux-${{ matrix.goarch }}.sha256"
+          sha256sum "supervisor-linux-${{ matrix.goarch }}" > "supervisor-linux-${{ matrix.goarch }}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: vsockd-linux-${{ matrix.goarch }}
-          path: dist/vsockd-linux-${{ matrix.goarch }}*
+          name: binaries-linux-${{ matrix.goarch }}
+          path: dist/*-linux-${{ matrix.goarch }}*
           if-no-files-found: error
           retention-days: 7
 
@@ -119,3 +123,7 @@ jobs:
             dist/vsockd-linux-amd64.sha256
             dist/vsockd-linux-arm64
             dist/vsockd-linux-arm64.sha256
+            dist/supervisor-linux-amd64
+            dist/supervisor-linux-amd64.sha256
+            dist/supervisor-linux-arm64
+            dist/supervisor-linux-arm64.sha256
