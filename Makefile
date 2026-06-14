@@ -1,4 +1,5 @@
-BINARY := vsockd
+BINARY     := vsockd
+SUPERVISOR := supervisor
 PKG    := github.com/olomix/vsockd
 DOCKER_IMAGE := vsockd:dev
 
@@ -10,6 +11,7 @@ BUILDFLAGS := -trimpath -ldflags "$(LDFLAGS)"
 
 build:
 	CGO_ENABLED=0 go build $(BUILDFLAGS) -o $(BINARY) ./cmd/vsockd
+	CGO_ENABLED=0 go build $(BUILDFLAGS) -o $(SUPERVISOR) ./cmd/supervisor
 
 test:
 	go test ./...
@@ -29,5 +31,5 @@ docker:
 	docker build -t $(DOCKER_IMAGE) .
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(SUPERVISOR)
 	rm -rf dist/

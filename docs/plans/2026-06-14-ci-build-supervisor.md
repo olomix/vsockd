@@ -63,11 +63,11 @@ The binary is `supervisor` (from `./cmd/supervisor`).
 
 ### Task 2: Add supervisor to the Makefile
 
-- [ ] update `build` to produce both binaries (vsockd and supervisor), e.g. add
+- [x] update `build` to produce both binaries (vsockd and supervisor), e.g. add
       a `SUPERVISOR := supervisor` var and a second
       `CGO_ENABLED=0 go build $(BUILDFLAGS) -o $(SUPERVISOR) ./cmd/supervisor`.
-- [ ] update `clean` to also `rm -f` the supervisor binary.
-- [ ] verify: `make build` produces both `vsockd` and `supervisor`; `make clean`
+- [x] update `clean` to also `rm -f` the supervisor binary.
+- [x] verify: `make build` produces both `vsockd` and `supervisor`; `make clean`
       removes both. Run `make build && ls -l vsockd supervisor && make clean`.
 
 ### Task 3: Verify acceptance criteria
