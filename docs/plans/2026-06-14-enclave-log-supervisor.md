@@ -162,7 +162,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 1: Supervisor config schema and validation
 
-- [ ] write tests first (`internal/supervisor/config_test.go`): valid config
+- [x] write tests first (`internal/supervisor/config_test.go`): valid config
       with a task + a sidecar and with multiple tasks; missing command; missing
       `role`; bad `role`/`restart`/`on_failure` enum values; duplicate process
       name; zero tasks allowed (daemon mode); `max_restarts` ≥ 0 and
@@ -170,7 +170,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
       and `max_restarts` > 0); defaulting of `restart`→`on-failure`,
       `on_failure`→`terminate`, `log_cid`→3; log_port out of range; non-positive
       buffer size; a `tags` map (empty key/value rejected).
-- [ ] add `internal/supervisor/config.go`: strict YAML (`KnownFields(true)`)
+- [x] add `internal/supervisor/config.go`: strict YAML (`KnownFields(true)`)
       with `Load`/`Validate` mirroring vsockd. Schema:
       `log_port` (uint32, required), `log_cid` (uint32, default 3),
       `tags` (string→string map, optional), `buffer` (`max_bytes` and/or
@@ -178,7 +178,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
       `[]{ name, command, args[], role: task|sidecar,
       restart: no|on-failure|always, max_restarts: int,
       restart_window: duration, on_failure: terminate|continue }`.
-- [ ] run `go test ./internal/supervisor/...` (config only) — pass before
+- [x] run `go test ./internal/supervisor/...` (config only) — pass before
       Task 2.
 
 ### Task 2: NDJSON envelope + encoder
