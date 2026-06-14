@@ -108,8 +108,16 @@ inject host fields per record.
    immediately after the opening brace, preserving every original byte. Handle
    the empty-object `{}` case (no trailing comma). A line that is not a valid
    JSON object is wrapped as a `raw` record:
-   `{"cid":N,"<hostKey>":{…},"type":"raw","msg":<json-quoted original>}`. Output
-   is therefore always well-formed NDJSON.
+   `{"cid":N,"<hostKey>":{…},"type":"raw","msg":<json-quoted original>}`. With
+   enrichment active, output is therefore always well-formed NDJSON; with no
+   `enrich` block, non-truncated lines pass through verbatim and
+   well-formedness depends on the producer (see decision 6). A valid object
+   that already declares
+   a top-level key the host adds (its own `cid`, or the host key) is also
+   wrapped as `raw` rather than spliced: emitting duplicate top-level keys lets
+   last-value-wins parsers shadow the host's authoritative `cid`, defeating the
+   un-spoofable guarantee. Detection scans only top-level keys (a nested `cid`
+   is harmless) and still preserves the original bytes verbatim in `msg`.
 3. **Enrichment namespaces & provenance — no merging (deliberate).** The
    supervisor owns `tags` (service/version, set inside the enclave). The host
    adds top-level `cid` and a host-tags object under a **configurable key**
@@ -132,9 +140,13 @@ inject host fields per record.
    with the rest of `config.Validate`). Both `file` and `stdout` are valid
    outputs; picking `stdout` means relayed logs share vsockd's process stdout
    (its own slog goes to stderr), a documented consequence.
-6. **Enrichment config is optional.** With no `enrich` block, the listener
-   still emits valid NDJSON but adds no `cid`/host-tags (it remains line-framed
-   pass-through — long lines are still bounded, see decision 8). `enrich.cid`
+6. **Enrichment config is optional.** With no `enrich` block, the listener is a
+   verbatim, line-framed pass-through: lines are framed and length-bounded but
+   emitted unmodified — non-JSON lines are not wrapped, so NDJSON
+   well-formedness then depends on the producer (an over-long line is still
+   flagged as a truncated `raw` record, see decision 8). With an `enrich` block
+   (even an empty one) non-object lines are wrapped as `raw`, so output is
+   always valid NDJSON. `enrich.cid`
    (bool) toggles the top-level `cid` field; `enrich.tags` (string→string map)
    populates the host-tags object; `enrich.host_key` (string, default `host`)
    names the key that object is emitted under.
@@ -145,12 +157,17 @@ inject host fields per record.
    lines and silently errors). Use a configurable `max_line_bytes` (sensible
    default, e.g. 1 MiB); an over-long line is truncated-and-flagged (emit it as
    a `raw` record with a `truncated:true` marker) and counted, never silently
-   dropped or used to wedge the reader.
+   dropped or used to wedge the reader. A floor (`minMaxLineBytes`, 16 — the
+   buffered reader's minimum buffer) is enforced at load: a smaller limit could
+   not actually be honored, so it is rejected rather than silently widened.
 9. **Reload mirrors the `upstream` swap.** The sink and the enrichment config
-   live in `atomic.Pointer`s; a same-port reload swaps them, and an in-flight
-   relay keeps using the old sink/enrichment until its connection closes —
-   identical semantics to the `vsock_to_tcp` upstream swap. Added/removed ports
-   bind/close normally.
+   live together in a single `atomic.Pointer[relayState]`; a same-port reload
+   swaps the pair as one unit, and an in-flight relay keeps using the old
+   sink/enrichment until its connection closes — identical semantics to the
+   `vsock_to_tcp` upstream swap. Bundling sink+enrichment (rather than two
+   separate pointers) prevents a connection accepted mid-swap from pairing a
+   new sink with old enrichment, or vice versa. Added/removed ports bind/close
+   normally.
 10. **Port uniqueness.** `log_relay` ports join the shared `seenPort` map so a
     collision with outbound / `vsock_to_tcp` / `metrics.vsock_port` is rejected
     at load. (The Node app's `3128`/`3000` are TCP loopback ports, a different
@@ -218,9 +235,9 @@ inject host fields per record.
       line)` that splices the prefix into a valid JSON object (empty-object
       aware) or wraps a non-object/over-long line as a `raw` record. The
       enclave's `tags` are never read or modified — host data is additive only.
-- [x] add `sink atomic.Pointer[sink]` and `enrich atomic.Pointer[enrichConfig]`
-      to the `listener` struct; `newLogRelayListener(cfg, s)` opens the sink and
-      stores both.
+- [x] add a single `relay atomic.Pointer[relayState]` (bundling sink +
+      enrichment) to the `listener` struct; `newLogRelayListener(cfg, s)` opens
+      the sink and stores the pair as one unit (decision 9).
 - [x] extend `NewServer` to accept `[]config.LogRelayListener`, build these
       listeners, and update its signature + the `app.New` call site in
       `internal/app/app.go` (`outbound.NewServer(..., opts.Config.LogRelay)`).
@@ -360,7 +377,8 @@ inject host fields per record.
   intact, and `tags` is never read or merged — host data is additive only.
 - **Sink**: `interface { io.Writer; Close() error }`. File =
   `os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)`. Stdout = a
-  no-op-Close wrapper. Held in `atomic.Pointer[sink]` for reload swap.
+  no-op-Close wrapper. Bundled with the enrichment config in
+  `atomic.Pointer[relayState]` and swapped as one unit on reload (decision 9).
 - **Handler**: `handleLogRelay(ctx, c vsockconn.Conn)` → track conn → bounded
   line reader → enrich+write → count → close. No dial, no allowlist, no per-CID
   auth (any peer the port accepts is relayed, same trust model as

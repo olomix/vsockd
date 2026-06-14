@@ -102,10 +102,18 @@ vsock_to_tcp:
 # `max_line_bytes` is optional (default 1 MiB); an over-long line is not
 # dropped — it is emitted as a truncated `raw` record and counted. A line
 # that is not a valid JSON object is wrapped as a `raw` record carrying the
-# original text in `msg`, so output is always well-formed NDJSON. `enrich`
-# is optional; with no `enrich` block the listener still emits framed,
-# bounded NDJSON but adds no cid/host tags. v1 handles one connection at a
-# time per listener (single-producer supervisor expectation).
+# original text in `msg`, so output is always well-formed NDJSON whenever an
+# `enrich` block is present (even an empty `enrich: {}`). A record that
+# already carries a top-level key the host adds (its own "cid" or the host
+# key) is likewise wrapped as `raw` rather than spliced, so the host's fields
+# stay un-spoofable (duplicate top-level keys would otherwise let last-wins
+# parsers shadow the host "cid"). `enrich` is optional; with no `enrich` block
+# the listener is a verbatim, line-framed pass-through — lines are framed and
+# length-bounded but emitted unmodified (non-JSON lines are not wrapped, so
+# output is NDJSON only if the producer sends it), though an over-long line is
+# still flagged as a truncated `raw` record. v1 handles one connection at a
+# time per listener
+# (single-producer supervisor expectation).
 log_relay:
   - port: 5140
     output: file

@@ -52,9 +52,29 @@ const (
 // rather than silently dropped (see plan decision 8).
 const defaultMaxLineBytes = 1 << 20 // 1 MiB
 
+// minMaxLineBytes is the smallest enforceable max_line_bytes. The relay reads
+// lines with a buffered reader whose internal buffer has a 16-byte floor
+// (bufio's minReadBufferSize), so a smaller limit cannot be honored — lines up
+// to that floor would pass unflagged. Reject sub-floor values rather than
+// silently enforcing a larger bound than configured.
+const minMaxLineBytes = 16
+
 // defaultHostKey is the JSON object key under which host-only tags are emitted
 // when enrich.host_key is omitted.
 const defaultHostKey = "host"
+
+// relayReservedKeys are top-level JSON keys the relay itself emits and must own
+// exclusively. "type", "msg", and "truncated" are written by the raw-record
+// wrapper (which can fire for any non-object or over-long line), so they are
+// always reserved. "cid" is reserved only when enrich.cid is enabled. A
+// host_key colliding with one of these would make the relay emit duplicate
+// top-level keys from its own config, which the runtime duplicate-key guard
+// (it only scans the enclave record) cannot catch — so reject it here.
+var relayReservedKeys = map[string]struct{}{
+	"type":      {},
+	"msg":       {},
+	"truncated": {},
+}
 
 // VSOCK reserves CIDs 0..2 (hypervisor/local/host). Enclave CIDs start at 3.
 const minCID uint32 = 3
@@ -454,6 +474,9 @@ func (l *LogRelayListener) validate() error {
 	}
 	if l.MaxLineBytes == 0 {
 		l.MaxLineBytes = defaultMaxLineBytes
+	} else if l.MaxLineBytes < minMaxLineBytes {
+		return fmt.Errorf("max_line_bytes %d must be 0 (default) or >= %d",
+			l.MaxLineBytes, minMaxLineBytes)
 	}
 	if l.Enrich != nil {
 		for k, v := range l.Enrich.Tags {
@@ -466,6 +489,18 @@ func (l *LogRelayListener) validate() error {
 		}
 		if l.Enrich.HostKey == "" {
 			l.Enrich.HostKey = defaultHostKey
+		}
+		// host_key is only emitted when there are tags to place under it.
+		if len(l.Enrich.Tags) > 0 {
+			if _, bad := relayReservedKeys[l.Enrich.HostKey]; bad {
+				return fmt.Errorf(
+					"enrich.host_key %q is reserved by the relay",
+					l.Enrich.HostKey)
+			}
+			if l.Enrich.CID && l.Enrich.HostKey == "cid" {
+				return errors.New(
+					`enrich.host_key "cid" collides with enrich.cid`)
+			}
 		}
 	}
 	return nil

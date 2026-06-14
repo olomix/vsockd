@@ -239,15 +239,14 @@ type applySwap struct {
 	// tearing down the accept loop. In-flight connections keep using the
 	// upstream they already dialed; new accepts pick up the replacement.
 	upstream *string
-	// sink and enrich are populated only when both the existing and new
-	// configs are log_relay on the same port. sink is the newly opened
-	// (refcounted) destination; CommitApply installs it and releases the
-	// listener's reference to the old sink, while an in-flight relay keeps
-	// the old sink open until it finishes (plan decision 9). enrich is the
-	// new per-connection enrichment for subsequent accepts. AbortApply
-	// releases sink so the fd opened during staging never leaks.
-	sink   *refSink
-	enrich *enrichConfig
+	// relay is populated only when both the existing and new configs are
+	// log_relay on the same port. It carries the newly opened (refcounted)
+	// sink paired with the new enrichment; CommitApply installs the pair
+	// atomically and releases the listener's reference to the old sink, while
+	// an in-flight relay keeps the old pair until it finishes (plan
+	// decision 9). AbortApply releases relay.sink so the fd opened during
+	// staging never leaks.
+	relay *relayState
 }
 
 // PrepareApply validates the new outbound configuration, binds any newly
@@ -284,8 +283,8 @@ func (s *Server) PrepareApply(
 		// Release sinks opened for matched log_relay ports that will not be
 		// installed because staging failed (no fd leak).
 		for _, sw := range swaps {
-			if sw.sink != nil {
-				sw.sink.release()
+			if sw.relay != nil {
+				sw.relay.sink.release()
 			}
 		}
 	}
@@ -313,13 +312,13 @@ func (s *Server) PrepareApply(
 				sw.upstream = &u
 			}
 			if newLn.mode == modeLogRelay {
-				// newLogRelayListener already opened the new sink; carry it
-				// (and the new enrichment) into the swap so CommitApply can
-				// install both atomically. cur keeps running; the new listener
-				// object is discarded after the swap. If staging fails or the
-				// plan is aborted, cleanup/AbortApply releases sw.sink.
-				sw.sink = newLn.sink.Load()
-				sw.enrich = newLn.enrich.Load()
+				// newLogRelayListener already opened the new sink and paired it
+				// with the new enrichment; carry that state into the swap so
+				// CommitApply can install the pair atomically. cur keeps
+				// running; the new listener object is discarded after the swap.
+				// If staging fails or the plan is aborted, cleanup/AbortApply
+				// releases sw.relay.sink.
+				sw.relay = newLn.relay.Load()
 			}
 			swaps = append(swaps, sw)
 			kept[newLn.port] = true
@@ -409,15 +408,15 @@ func (p *ApplyPlan) CommitApply() {
 		if sw.upstream != nil {
 			sw.listener.replaceUpstream(*sw.upstream)
 		}
-		if sw.sink != nil {
-			// Install the new sink/enrichment for subsequent accepts, then
-			// release the listener's reference to the old sink. An in-flight
-			// relay that already acquired the old sink keeps it open until it
-			// finishes; the fd is closed only when that last reference drops.
-			sw.listener.enrich.Store(sw.enrich)
-			old := sw.listener.sink.Swap(sw.sink)
+		if sw.relay != nil {
+			// Install the new sink+enrichment pair for subsequent accepts,
+			// then release the listener's reference to the old sink. An
+			// in-flight relay that already acquired the old state keeps it
+			// until it finishes; the fd is closed only when that last
+			// reference drops.
+			old := sw.listener.relay.Swap(sw.relay)
 			if old != nil {
-				old.release()
+				old.sink.release()
 			}
 		}
 	}
@@ -449,8 +448,8 @@ func (p *ApplyPlan) AbortApply() {
 	// Release sinks opened for matched log_relay ports that are now being
 	// discarded, so a staged-but-not-committed reload leaks no fd.
 	for _, sw := range p.swaps {
-		if sw.sink != nil {
-			sw.sink.release()
+		if sw.relay != nil {
+			sw.relay.sink.release()
 		}
 	}
 	p.aborted = true
@@ -552,13 +551,13 @@ type listener struct {
 	// tearing down the vsock accept loop. Unused for HTTP-proxy listeners.
 	upstream atomic.Pointer[string]
 
-	// sink and enrich hold the live log_relay sink and enrichment config.
-	// Both are atomic so a SIGHUP reload can swap them for new connections
-	// while an in-flight relay keeps the ones it started with (plan
-	// decision 9). Only populated for log_relay listeners. maxLineBytes
-	// bounds a single relayed NDJSON line.
-	sink         atomic.Pointer[refSink]
-	enrich       atomic.Pointer[enrichConfig]
+	// relay holds the live log_relay sink and enrichment config as one
+	// atomic unit so a SIGHUP reload swaps them together for new connections
+	// while an in-flight relay keeps the pair it started with (plan
+	// decision 9). Bundling them prevents a connection accepted mid-swap from
+	// pairing a new sink with old enrichment. Only populated for log_relay
+	// listeners. maxLineBytes bounds a single relayed NDJSON line.
+	relay        atomic.Pointer[relayState]
 	maxLineBytes int
 }
 

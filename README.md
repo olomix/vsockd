@@ -444,9 +444,20 @@ Behavior and rules:
 - **`output` is required**, one of `file` or `stdout`. `path` is required iff
   `output: file` and must be absent for `output: stdout`. These are strict,
   fail-loud validation errors at load time.
-- **Always well-formed NDJSON.** A line that is not a valid JSON object is
-  wrapped as a `raw` record carrying the original text in `msg`
-  (`{"cid":N,"<host_key>":{…},"type":"raw","msg":<quoted>}`).
+- **Well-formed NDJSON when enriching.** With an `enrich` block (even an empty
+  `enrich: {}`), a line that is not a valid JSON object is wrapped as a `raw`
+  record carrying the original text in `msg`
+  (`{"cid":N,"<host_key>":{…},"type":"raw","msg":<quoted>}`), so every emitted
+  line is valid NDJSON. Without an `enrich` block the listener is a verbatim
+  pass-through and well-formedness depends on the producer (see below).
+- **Reserved keys stay un-spoofable.** If a record already declares a
+  top-level key the host adds (its own `cid`, or the configured host key),
+  splicing would produce duplicate top-level keys — and many JSON parsers keep
+  the *last* one, letting the enclave shadow the host's authoritative `cid`. To
+  keep the host fields un-spoofable, such a record is wrapped as a `raw` record
+  instead: the host fields sit at the top level un-shadowed and the original
+  bytes are preserved verbatim in `msg`. The supervisor owns `tags`, not these
+  host-only keys, so a legitimate collision should not occur.
 - **Bounded line length.** `max_line_bytes` (default 1 MiB) caps a single
   line; an over-long line is never silently dropped — it is emitted as a
   truncated `raw` record (with a `truncated:true` marker) and counted.
@@ -454,9 +465,12 @@ Behavior and rules:
   existing content, so logs survive restarts) and, if it does not yet exist,
   created with mode `0o640`. Pre-create the path with the ownership and
   permissions your log shipper needs if the defaults do not fit.
-- **Optional `enrich`.** With no `enrich` block the listener still emits
-  framed, bounded NDJSON but adds no `cid`/host tags (line-framed
-  pass-through).
+- **Optional `enrich`.** With no `enrich` block the listener is a verbatim,
+  line-framed pass-through: each line is framed and length-bounded but emitted
+  unmodified, so output is NDJSON only if the producer sends NDJSON (no
+  `cid`/host tags are added, and non-JSON lines are not wrapped). An over-long
+  line is still flagged as a truncated `raw` record. Use an empty `enrich: {}`
+  to keep the always-NDJSON wrapping without adding any host fields.
 - **stdout caveat.** Picking `output: stdout` means relayed logs share
   vsockd's own process stdout; vsockd's slog still goes to stderr, but mixing
   the two on stdout is a documented consequence — prefer a file sink if that

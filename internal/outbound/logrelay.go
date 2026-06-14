@@ -51,6 +51,16 @@ type refSink struct {
 
 func newRefSink(s sink) *refSink { return &refSink{s: s, n: 1} }
 
+// relayState bundles a log_relay listener's live sink and enrichment so a
+// reload swaps them as one atomic unit. Holding them in two separate
+// atomic.Pointers let a connection accepted mid-swap pair a new sink with old
+// enrichment (or vice versa); a single pointer makes the pair indivisible
+// (plan decision 9).
+type relayState struct {
+	sink   *refSink
+	enrich *enrichConfig
+}
+
 // acquire takes an additional reference and returns the underlying sink. It
 // reports false if the refSink was already released to zero (a concurrent
 // reload closed the underlying fd); the caller must then re-Load the listener's
@@ -111,11 +121,14 @@ func openSink(cfg config.LogRelayListener) (sink, error) {
 // the top-level "cid" field; hostObjJSON is the marshaled host-tags object
 // (nil when there are no tags) emitted under the key whose JSON-quoted form is
 // hostKeyJSON. The enclave's own payload is never decoded, so values (int64s,
-// key order) survive intact.
+// key order) survive intact. reserved holds the top-level key names this
+// config adds ("cid" and/or the host key) so emit can detect a record that
+// already carries one of them (see hasReservedTopLevelKey).
 type enrichConfig struct {
 	cid         bool
 	hostKeyJSON []byte
 	hostObjJSON []byte
+	reserved    map[string]struct{}
 }
 
 // newEnrichConfig builds the per-listener enrichment from config. Returns
@@ -135,6 +148,10 @@ func newEnrichConfig(e *config.LogRelayEnrich) (*enrichConfig, error) {
 		return nil, fmt.Errorf("enrich.host_key: %w", err)
 	}
 	ec := &enrichConfig{cid: e.CID, hostKeyJSON: hostKeyJSON}
+	reserved := make(map[string]struct{})
+	if e.CID {
+		reserved["cid"] = struct{}{}
+	}
 	if len(e.Tags) > 0 {
 		// json.Marshal sorts map keys, giving deterministic output bytes.
 		b, err := json.Marshal(e.Tags)
@@ -142,6 +159,10 @@ func newEnrichConfig(e *config.LogRelayEnrich) (*enrichConfig, error) {
 			return nil, fmt.Errorf("enrich.tags: %w", err)
 		}
 		ec.hostObjJSON = b
+		reserved[hostKey] = struct{}{}
+	}
+	if len(reserved) > 0 {
+		ec.reserved = reserved
 	}
 	return ec, nil
 }
@@ -169,25 +190,33 @@ func (ec *enrichConfig) buildPrefix(cid uint32) []byte {
 // enricher applies one connection's host enrichment to each input line.
 // active distinguishes a configured-but-empty enrichment (which still wraps
 // non-object lines as raw records) from no enrichment at all (pass-through).
+// reserved is the set of top-level keys the prefix adds, used to detect a
+// record that would collide with them.
 type enricher struct {
-	active bool
-	prefix []byte
+	active   bool
+	prefix   []byte
+	reserved map[string]struct{}
 }
 
-func (l *listener) newEnricher(cid uint32) enricher {
-	ec := l.enrich.Load()
+func newEnricher(ec *enrichConfig, cid uint32) enricher {
 	if ec == nil {
 		return enricher{active: false}
 	}
-	return enricher{active: true, prefix: ec.buildPrefix(cid)}
+	return enricher{
+		active:   true,
+		prefix:   ec.buildPrefix(cid),
+		reserved: ec.reserved,
+	}
 }
 
-// emit returns the enriched output line (without trailing newline). A valid
-// JSON object gets the host prefix spliced after its opening brace,
-// preserving every original byte; anything else (non-object, or a truncated
-// over-long line) is wrapped as a raw record so output is always
-// well-formed NDJSON. With no enrichment and no truncation the line passes
-// through unmodified.
+// emit returns the enriched output line (without trailing newline). When
+// enrichment is active a valid JSON object gets the host prefix spliced after
+// its opening brace, preserving every original byte, and a non-object line is
+// wrapped as a raw record, so every emitted line is well-formed NDJSON. With
+// no enrichment a non-truncated line passes through verbatim (so NDJSON
+// well-formedness then depends on the producer). A truncated over-long line is
+// always wrapped as a raw record carrying the truncated marker, regardless of
+// enrichment, so truncation is never silent.
 func (e enricher) emit(line []byte, truncated bool) []byte {
 	if truncated {
 		return wrapRaw(e.prefix, line, true)
@@ -196,9 +225,71 @@ func (e enricher) emit(line []byte, truncated bool) []byte {
 		return line
 	}
 	if isJSONObject(line) {
+		// A record that already declares a top-level key the host adds (its
+		// own "cid", or the host key) would yield duplicate top-level keys
+		// after splicing. Many JSON parsers keep the last value, so the
+		// enclave could shadow the host's authoritative "cid" and defeat the
+		// un-spoofable guarantee. Wrap such records as raw instead: the host
+		// fields stay at the top level un-shadowed and the original bytes are
+		// preserved verbatim inside "msg".
+		if len(e.reserved) > 0 && hasReservedTopLevelKey(line, e.reserved) {
+			return wrapRaw(e.prefix, line, false)
+		}
 		return spliceObject(e.prefix, line)
 	}
 	return wrapRaw(e.prefix, line, false)
+}
+
+// hasReservedTopLevelKey reports whether the already-valid JSON object in line
+// declares any top-level key in reserved. Only top-level keys count; an
+// identically named key nested inside a value object is harmless. The scan
+// tracks brace/bracket depth so nested keys are skipped.
+func hasReservedTopLevelKey(line []byte, reserved map[string]struct{}) bool {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	// Decode numbers as json.Number, not float64: a syntactically valid but
+	// float64-overflowing number (e.g. 1e1000) would otherwise make Token()
+	// fail mid-scan, aborting before a later reserved key is seen and letting
+	// a spoofed key slip through into spliceObject.
+	dec.UseNumber()
+	// Consume the opening brace of the (already-validated) object.
+	if _, err := dec.Token(); err != nil {
+		return false
+	}
+	depth := 1
+	expectKey := true
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+				expectKey = false
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return false
+				}
+				expectKey = depth == 1
+			}
+			continue
+		}
+		if depth != 1 {
+			continue
+		}
+		if expectKey {
+			if s, ok := tok.(string); ok {
+				if _, hit := reserved[s]; hit {
+					return true
+				}
+			}
+			expectKey = false
+		} else {
+			expectKey = true
+		}
+	}
 }
 
 // isJSONObject reports whether line is a JSON object (leading '{' and valid
@@ -266,14 +357,13 @@ func newLogRelayListener(
 	if err != nil {
 		return nil, err
 	}
-	l.enrich.Store(ec)
 	sk, err := openSink(cfg)
 	if err != nil {
 		s.metric.LogRelayErrors.
 			WithLabelValues(metrics.LogRelayErrorSink).Inc()
 		return nil, err
 	}
-	l.sink.Store(newRefSink(sk))
+	l.relay.Store(&relayState{sink: newRefSink(sk), enrich: ec})
 	return l, nil
 }
 
@@ -283,8 +373,8 @@ func newLogRelayListener(
 // in-flight relay holding its own reference keeps the underlying sink open
 // until it finishes.
 func (l *listener) closeSink() {
-	if rp := l.sink.Swap(nil); rp != nil {
-		rp.release()
+	if st := l.relay.Swap(nil); st != nil {
+		st.sink.release()
 	}
 }
 
@@ -304,31 +394,32 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	l.server.metric.LogRelayConnections.Inc()
 
 	cid := c.PeerCID()
-	enr := l.newEnricher(cid)
 	maxLine := l.maxLineBytes
 	if maxLine <= 0 {
 		maxLine = defaultLogRelayMaxLine
 	}
 
-	// Acquire a reference for this connection's lifetime so a concurrent
-	// reload that swaps (or removes) the listener's sink does not close the
-	// fd this relay is still writing to (plan decision 9). The matching
-	// release runs after the loop returns.
-	var rp *refSink
+	// Snapshot sink and enrichment as one atomic pair and acquire a reference
+	// for this connection's lifetime, so a concurrent reload that swaps (or
+	// removes) them does not close the fd this relay is still writing to and
+	// cannot split the pair (new sink with old enrichment, or vice versa) —
+	// plan decision 9. The matching release runs after the loop returns.
+	var st *relayState
 	var sk sink
 	for {
-		rp = l.sink.Load()
-		if rp == nil {
+		st = l.relay.Load()
+		if st == nil {
 			return
 		}
 		var ok bool
-		if sk, ok = rp.acquire(); ok {
+		if sk, ok = st.sink.acquire(); ok {
 			break
 		}
-		// A concurrent reload released this refSink to zero between Load and
-		// acquire; re-Load the now-current refSink and retry.
+		// A concurrent reload released this sink to zero between Load and
+		// acquire; re-Load the now-current state and retry.
 	}
-	defer rp.release()
+	defer st.sink.release()
+	enr := newEnricher(st.enrich, cid)
 
 	// +1 so ReadSlice can hold a full max-length line *and* its '\n'
 	// delimiter: a line whose content is exactly maxLine bytes must be
@@ -346,6 +437,11 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 			payload := line
 			if !truncated {
 				payload = dropNewline(line)
+			} else if len(payload) > maxLine {
+				// ReadSlice fills the maxLine+1 buffer before flagging
+				// ErrBufferFull, so the returned slice can carry one byte past
+				// the limit. Trim it so the emitted record honors maxLine.
+				payload = payload[:maxLine]
 			}
 			out.Reset()
 			out.Write(enr.emit(payload, truncated))

@@ -372,6 +372,128 @@ func TestLogRelay_NonJSONWrappedAsRaw(t *testing.T) {
 	}
 }
 
+// TestLogRelay_ReservedKeyCollisionWrappedAsRaw verifies that a record which
+// already carries a top-level key the host adds ("cid" here) is emitted as a
+// raw record rather than spliced. Splicing would produce duplicate top-level
+// keys; since many JSON parsers keep the last value, the enclave could
+// otherwise shadow the host's authoritative cid and defeat the un-spoofable
+// guarantee. The host cid must stay authoritative and the enclave's spoofed
+// value must survive only inside the quoted "msg".
+func TestLogRelay_ReservedKeyCollisionWrappedAsRaw(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	// A nested "cid" must NOT trigger the collision path — only top-level.
+	const spoof = `{"cid":999,"inner":{"cid":777},"msg":"hello"}`
+	sendLogLines(t, reg, logRelayCID, port, spoof)
+	got := waitForFileLines(t, path, 1)[0]
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(got), &rec); err != nil {
+		t.Fatalf("collision output not valid JSON: %v (%s)", err, got)
+	}
+	if rec["type"] != "raw" {
+		t.Errorf("type = %v, want raw (collision should wrap): %s",
+			rec["type"], got)
+	}
+	// The host cid is authoritative; the spoofed 999 lives only in msg.
+	if rec["cid"] != float64(logRelayCID) {
+		t.Errorf("cid = %v, want host cid %d (un-spoofable)",
+			rec["cid"], logRelayCID)
+	}
+	if rec["msg"] != spoof {
+		t.Errorf("msg = %v, want original spoof line verbatim", rec["msg"])
+	}
+}
+
+// TestLogRelay_NestedReservedKeyStillSpliced verifies that a reserved key name
+// appearing only inside a nested value does not trigger the collision path:
+// the record is spliced normally because there is no top-level duplicate.
+func TestLogRelay_NestedReservedKeyStillSpliced(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	const in = `{"inner":{"cid":777,"host":{"x":1}},"msg":"hi"}`
+	sendLogLines(t, reg, logRelayCID, port, in)
+	got := waitForFileLines(t, path, 1)[0]
+
+	if !strings.HasPrefix(got, `{"cid":16,`) {
+		t.Fatalf("nested reserved key blocked splice: %s", got)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(got), &rec); err != nil {
+		t.Fatalf("output not valid JSON: %v (%s)", err, got)
+	}
+	if rec["type"] == "raw" {
+		t.Errorf("nested reserved key wrongly wrapped as raw: %s", got)
+	}
+	if rec["cid"] != float64(logRelayCID) {
+		t.Errorf("cid = %v, want %d", rec["cid"], logRelayCID)
+	}
+}
+
+// TestLogRelay_OverflowNumberReservedKeyWrapped verifies the collision scan is
+// not fooled by a syntactically valid but float64-overflowing number appearing
+// before a reserved top-level key. Such a record must still be wrapped as raw
+// so the enclave cannot shadow the host's authoritative "cid".
+func TestLogRelay_OverflowNumberReservedKeyWrapped(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	const in = `{"n":1e1000,"cid":999}`
+	sendLogLines(t, reg, logRelayCID, port, in)
+	got := waitForFileLines(t, path, 1)[0]
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(got), &rec); err != nil {
+		t.Fatalf("output not valid JSON: %v (%s)", err, got)
+	}
+	if rec["type"] != "raw" {
+		t.Errorf("overflow-number record not wrapped raw: %s", got)
+	}
+	// The host's cid must win, not the enclave's spoofed 999.
+	if rec["cid"] != float64(logRelayCID) {
+		t.Errorf("cid = %v, want %d (host shadowed): %s",
+			rec["cid"], logRelayCID, got)
+	}
+	if msg, _ := rec["msg"].(string); !strings.Contains(msg, `"cid":999`) {
+		t.Errorf("original bytes not preserved in msg: %s", got)
+	}
+}
+
 // TestLogRelay_OverLongLineTruncated verifies a line exceeding max_line_bytes
 // is emitted as a truncated raw record and the reader resyncs to the next
 // line rather than wedging or dropping it.
@@ -405,6 +527,11 @@ func TestLogRelay_OverLongLineTruncated(t *testing.T) {
 	}
 	if first["truncated"] != true {
 		t.Errorf("truncated flag = %v, want true", first["truncated"])
+	}
+	// The emitted payload must honor max_line_bytes exactly, not spill one
+	// byte past it from the maxLine+1 read buffer.
+	if msg, _ := first["msg"].(string); len(msg) != 32 {
+		t.Errorf("truncated msg = %d bytes, want 32: %q", len(msg), msg)
 	}
 	// Resync: the following well-formed line must be enriched normally.
 	if !strings.Contains(lines[1], `"after":true`) {

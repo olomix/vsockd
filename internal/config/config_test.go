@@ -617,6 +617,16 @@ log_relay:
 			want: "max_line_bytes -1 must be >= 0",
 		},
 		{
+			name: "log_relay sub-floor max_line_bytes",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    max_line_bytes: 8
+`,
+			want: "max_line_bytes 8 must be 0 (default) or >= 16",
+		},
+		{
 			name: "log_relay empty tag value",
 			yaml: `
 log_relay:
@@ -639,6 +649,33 @@ log_relay:
         "": us-east-1
 `,
 			want: "enrich.tags has an empty key",
+		},
+		{
+			name: "log_relay host_key collides with raw wrapper",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    enrich:
+      host_key: msg
+      tags:
+        region: us-east-1
+`,
+			want: `enrich.host_key "msg" is reserved by the relay`,
+		},
+		{
+			name: "log_relay host_key cid collides with enrich.cid",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    enrich:
+      cid: true
+      host_key: cid
+      tags:
+        region: us-east-1
+`,
+			want: `enrich.host_key "cid" collides with enrich.cid`,
 		},
 		{
 			name: "log_relay port collides with outbound",
