@@ -443,6 +443,10 @@ Behavior and rules:
 - **Bounded line length.** `max_line_bytes` (default 1 MiB) caps a single
   line; an over-long line is never silently dropped — it is emitted as a
   truncated `raw` record (with a `truncated:true` marker) and counted.
+- **File sink.** A `file` sink is opened append-only (it never truncates
+  existing content, so logs survive restarts) and, if it does not yet exist,
+  created with mode `0o640`. Pre-create the path with the ownership and
+  permissions your log shipper needs if the defaults do not fit.
 - **Optional `enrich`.** With no `enrich` block the listener still emits
   framed, bounded NDJSON but adds no `cid`/host tags (line-framed
   pass-through).

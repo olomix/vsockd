@@ -308,6 +308,49 @@ func TestLogRelay_OverLongLineTruncated(t *testing.T) {
 	}
 }
 
+// TestLogRelay_ExactMaxLineNotTruncated verifies the boundary: a line whose
+// content is exactly max_line_bytes long is accepted and enriched normally,
+// not flagged truncated (the reader buffer must hold the line plus its '\n').
+func TestLogRelay_ExactMaxLineNotTruncated(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	// 32-byte JSON object: `{"v":"` + 24 'A' + `"}`.
+	exact := `{"v":"` + strings.Repeat("A", 24) + `"}`
+	if len(exact) != 32 {
+		t.Fatalf("test setup: line is %d bytes, want 32", len(exact))
+	}
+
+	cfgs := []config.LogRelayListener{{
+		Port:         port,
+		Output:       config.LogRelayOutputFile,
+		Path:         path,
+		MaxLineBytes: 32,
+		Enrich:       &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	sendLogLines(t, reg, logRelayCID, port, exact)
+	lines := waitForFileLines(t, path, 1)
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("output not valid JSON: %v (%s)", err, lines[0])
+	}
+	if _, ok := rec["truncated"]; ok {
+		t.Errorf("exact-length line wrongly flagged truncated: %s", lines[0])
+	}
+	if rec["type"] == "raw" {
+		t.Errorf("exact-length object wrapped as raw: %s", lines[0])
+	}
+	if rec["v"] != strings.Repeat("A", 24) {
+		t.Errorf("original content not preserved: %s", lines[0])
+	}
+}
+
 // TestLogRelay_NoEnrichPassThrough verifies that without an enrich block the
 // listener frames lines but leaves their content unmodified.
 func TestLogRelay_NoEnrichPassThrough(t *testing.T) {

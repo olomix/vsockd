@@ -308,7 +308,10 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	sk := rp.acquire()
 	defer rp.release()
 
-	br := bufio.NewReaderSize(c, maxLine)
+	// +1 so ReadSlice can hold a full max-length line *and* its '\n'
+	// delimiter: a line whose content is exactly maxLine bytes must be
+	// accepted, not flagged truncated.
+	br := bufio.NewReaderSize(c, maxLine+1)
 	var out bytes.Buffer
 	for {
 		line, err := br.ReadSlice('\n')
