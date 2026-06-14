@@ -216,6 +216,34 @@ func TestLogRelay_CustomHostKey(t *testing.T) {
 	}
 }
 
+// TestLogRelay_ControlCharHostKey verifies a host_key with control bytes is
+// JSON-encoded (not strconv.Quote), keeping output valid NDJSON.
+func TestLogRelay_ControlCharHostKey(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{
+			HostKey: "h\x7fk",
+			Tags:    map[string]string{"region": "eu-west-1"},
+		},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	sendLogLines(t, reg, logRelayCID, port, `{"x":1}`)
+	got := waitForFileLines(t, path, 1)[0]
+
+	if !json.Valid([]byte(got)) {
+		t.Errorf("output is not valid JSON: %q", got)
+	}
+}
+
 // TestLogRelay_FinalLineNoNewline verifies a record that arrives without a
 // trailing newline (peer closes mid-stream) is still emitted and enriched —
 // the EOF-with-buffered-data branch of handleLogRelay.

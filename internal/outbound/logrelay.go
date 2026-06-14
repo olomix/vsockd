@@ -103,11 +103,12 @@ func openSink(cfg config.LogRelayListener) (sink, error) {
 
 // enrichConfig is the precomputed, per-listener host enrichment. cid toggles
 // the top-level "cid" field; hostObjJSON is the marshaled host-tags object
-// (nil when there are no tags) emitted under hostKey. The enclave's own
-// payload is never decoded, so values (int64s, key order) survive intact.
+// (nil when there are no tags) emitted under the key whose JSON-quoted form is
+// hostKeyJSON. The enclave's own payload is never decoded, so values (int64s,
+// key order) survive intact.
 type enrichConfig struct {
 	cid         bool
-	hostKey     string
+	hostKeyJSON []byte
 	hostObjJSON []byte
 }
 
@@ -121,7 +122,13 @@ func newEnrichConfig(e *config.LogRelayEnrich) (*enrichConfig, error) {
 	if hostKey == "" {
 		hostKey = logRelayDefaultHostKey
 	}
-	ec := &enrichConfig{cid: e.CID, hostKey: hostKey}
+	// Marshal the key as JSON (not strconv.Quote) so an operator-supplied
+	// host_key with control bytes still yields well-formed NDJSON.
+	hostKeyJSON, err := json.Marshal(hostKey)
+	if err != nil {
+		return nil, fmt.Errorf("enrich.host_key: %w", err)
+	}
+	ec := &enrichConfig{cid: e.CID, hostKeyJSON: hostKeyJSON}
 	if len(e.Tags) > 0 {
 		// json.Marshal sorts map keys, giving deterministic output bytes.
 		b, err := json.Marshal(e.Tags)
@@ -145,7 +152,7 @@ func (ec *enrichConfig) buildPrefix(cid uint32) []byte {
 		b = append(b, ',')
 	}
 	if len(ec.hostObjJSON) > 0 {
-		b = append(b, strconv.Quote(ec.hostKey)...)
+		b = append(b, ec.hostKeyJSON...)
 		b = append(b, ':')
 		b = append(b, ec.hostObjJSON...)
 		b = append(b, ',')
