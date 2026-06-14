@@ -196,15 +196,15 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 3: Frame-granular ring buffer with drop accounting
 
-- [ ] write tests first: enqueue past capacity drops oldest **whole** frames
+- [x] write tests first: enqueue past capacity drops oldest **whole** frames
       and increments a drop counter; never blocks; `DrainTo(w)` writes buffered
       frames in FIFO order; after a drop, the next drain (or an explicit
       `TakeDrops()`) yields the dropped count exactly once; concurrent
       enqueue/drain is race-free (`-race`).
-- [ ] add `internal/supervisor/buffer.go`: bounded queue of `[]byte` frames
+- [x] add `internal/supervisor/buffer.go`: bounded queue of `[]byte` frames
       with a byte and/or record budget, drop-oldest eviction at frame
       granularity, atomic drop counter, non-blocking `Enqueue`.
-- [ ] run tests (`-race`) — pass before Task 4.
+- [x] run tests (`-race`) — pass before Task 4.
 
 ### Task 4: vsock shipper (dial, drain, reconnect, drop record, flush)
 
