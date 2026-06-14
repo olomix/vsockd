@@ -56,6 +56,9 @@ processes:
     # but then runs healthily past the window gets a fresh budget. Equivalent
     # to systemd StartLimitBurst / StartLimitIntervalSec. restart_window is
     # required when restart != no and max_restarts > 0.
+    # max_restarts defaults to 0 (a zero budget: gives up on the first restart-
+    # warranting exit, even under on-failure/always), so set it explicitly
+    # whenever you want restarts to actually happen.
     max_restarts: 3
     restart_window: 60s
     # on_failure: terminate | continue (default terminate). What happens when a

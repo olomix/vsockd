@@ -550,7 +550,10 @@ policies):
 - `max_restarts` + `restart_window` — a **windowed** crash-loop cap: a process
   gives up only after `max_restarts` restarts *within* `restart_window` (a
   genuine hot-loop), so a process that crashes occasionally but then runs
-  healthily past the window gets a fresh budget.
+  healthily past the window gets a fresh budget. `max_restarts` defaults to `0`,
+  which is a budget of zero — the process gives up on its **first** restart-
+  warranting exit even under `restart: on-failure`/`always`. Set `max_restarts`
+  (and `restart_window`) explicitly whenever you actually want restarts.
 - `on_failure: terminate | continue` (default `terminate`) — what happens when
   a process *gives up*: `terminate` = gracefully shut everything down and exit
   non-zero; `continue` = abandon just this process and keep the rest running.
