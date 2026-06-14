@@ -6,9 +6,11 @@
 # test enclave. Raw-TCP passthrough (non-HTTP workloads: databases, gRPC,
 # arbitrary protocols) lives under its own top-level sections tcp_to_vsock
 # (TCP → vsock) and vsock_to_tcp (vsock → TCP); these work identically
-# whether vsockd runs on the parent host or inside the enclave. The schema
-# is documented in internal/config/config.go and validated strictly at
-# load time.
+# whether vsockd runs on the parent host or inside the enclave. log_relay
+# is the host-side vsock log sink: it reads enclave NDJSON line by line,
+# enriches each record with host-only metadata (peer CID + host tags), and
+# lands it in a local file or stdout. The schema is documented in
+# internal/config/config.go and validated strictly at load time.
 
 inbound:
   # HTTPS: terminate TCP on the host, extract SNI, pass the TLS record
@@ -72,6 +74,64 @@ tcp_to_vsock:
 vsock_to_tcp:
   - port: 9000
     upstream: 10.0.0.5:5432
+
+# Host-side vsock log sink + enrichment (vsock → local sink). Accepts vsock
+# connections, reads the incoming NDJSON stream line by line, enriches each
+# record with host-only metadata, and writes the enriched lines to a local
+# sink (an append-only file or stdout). It is the host endpoint for enclave
+# log delivery: an in-enclave supervisor connects out to the parent (CID 3)
+# on this port and ships framed NDJSON; log_relay lands it on the host where
+# a delivery agent (CloudWatch agent / vector / fluent-bit) or journald takes
+# over.
+#
+# Two-layer enrichment, each side in its own namespace, NO merging:
+#   - the supervisor (inside the enclave) owns "tags" (e.g. service, version);
+#   - log_relay (on the host) adds the un-spoofable peer "cid" and a host-tags
+#     object the enclave cannot see (region, instance, …).
+# log_relay deliberately does NOT merge host data into the enclave's "tags"
+# (or rewrite the record). Merging would force a full JSON decode/re-encode —
+# mangling int64s (pids/timestamps lose precision as float64) and reordering
+# keys — and impose a collision policy that is not vsockd's to make. Records
+# are spliced byte-for-byte: the host prefix ("cid":N,"<host_key>":{…},) is
+# inserted right after the opening brace, every original byte preserved. Any
+# reshaping/flattening/merging is the downstream log-processing pipeline's
+# job, intentionally outside vsockd's scope.
+#
+# Rules: `output` is required and is one of `file` | `stdout`. `path` is
+# required iff `output: file` and must be absent for `output: stdout`.
+# `max_line_bytes` is optional (default 1 MiB); an over-long line is not
+# dropped — it is emitted as a truncated `raw` record and counted. A line
+# that is not a valid JSON object is wrapped as a `raw` record carrying the
+# original text in `msg`, so output is always well-formed NDJSON whenever an
+# `enrich` block is present (even an empty `enrich: {}`). A record that
+# already carries a top-level key the host adds (its own "cid" or the host
+# key) is likewise wrapped as `raw` rather than spliced, so the host's fields
+# stay un-spoofable (duplicate top-level keys would otherwise let last-wins
+# parsers shadow the host "cid"). `enrich` is optional; with no `enrich` block
+# the listener is a verbatim, line-framed pass-through — lines are framed and
+# length-bounded but emitted unmodified (non-JSON lines are not wrapped, so
+# output is NDJSON only if the producer sends it), though an over-long line is
+# still flagged as a truncated `raw` record. v1 handles one connection at a
+# time per listener
+# (single-producer supervisor expectation).
+log_relay:
+  - port: 5140
+    output: file
+    path: /var/log/enclave/app.ndjson
+    max_line_bytes: 1048576      # optional; default 1 MiB
+    enrich:
+      cid: true                  # add top-level "cid": <peer CID>
+      host_key: host             # optional; key for host tags (default "host")
+      tags:                      # host-only metadata, emitted under host_key
+        region: us-east-1
+        instance: i-0abc123
+
+  # stdout sink, no enrich → framed, bounded pass-through. Note: relayed logs
+  # then share vsockd's own process stdout; vsockd's slog still goes to stderr,
+  # but mixing the two streams on stdout is a documented consequence — prefer a
+  # file sink (or run vsockd's logs through stderr only) if that matters.
+  - port: 5141
+    output: stdout
 
 # Prometheus /metrics endpoint. Disabled by default — omit this section
 # (or pass -metrics-addr "") to leave the endpoint off. Use `bind` on the

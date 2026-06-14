@@ -1,0 +1,93 @@
+# supervisor example configuration.
+#
+# The supervisor is PID 1's child inside an AWS Nitro Enclave (tini -g stays
+# PID 1). It spawns and supervises the enclave's processes — here an
+# application `task` plus a vsockd `sidecar` — captures each one's
+# stdout/stderr AND its own operational logs, frames every line as NDJSON, and
+# ships the combined stream over its OWN vsock connection to the parent
+# (log_cid:log_port). The host-side `log_relay` (see examples/vsockd.yaml,
+# log_port 5140) receives it. The schema is documented in
+# internal/supervisor/config.go and validated strictly at load time.
+
+# Destination for the log stream. The supervisor opens its own vsock
+# connection here — it does NOT route through the sidecar vsockd, so vsockd's
+# own crash output is still captured and shipped.
+log_port: 5140          # required; must match the host log_relay listener
+log_cid: 3              # default 3 (the Nitro parent); 0..2 are reserved
+
+# Source-side identity, emitted under each record's "tags" key. This is the
+# enclave half of the two-layer enrichment: the host-side log_relay separately
+# adds the un-spoofable peer "cid" and host-only tags under its own "host" key,
+# so the namespaces never collide. The supervisor never sets "cid"/"host".
+tags:
+  service: abc
+  version: "1.1.2"
+
+# Bounded ring buffer that decouples log producers (pipe readers + the
+# supervisor's own slog handler) from the network: producers never block. When
+# the listener is down frames accumulate here; on overflow the OLDEST whole
+# frames are dropped (never mid-frame — that would corrupt NDJSON) and counted,
+# and a {"type":"drop","count":N} record is emitted on the next successful send
+# so loss is observable downstream. At least one dimension must be positive;
+# omit the section entirely to take the defaults (8 MiB / 10000 records).
+buffer:
+  max_bytes: 8388608    # 8 MiB
+  max_records: 10000
+
+# The supervised process list. Each entry declares a role and a
+# restart/failure policy modelled on systemd Restart= / Docker restart
+# policies. Processes inherit the supervisor's process group (no Setpgid), so
+# tini -g delivers external SIGTERM/SIGINT to them directly; the supervisor
+# signals children by PID only when IT initiates a graceful shutdown.
+processes:
+  # The application. `task` is what the supervisor exists to run: when ALL
+  # tasks reach a terminal state the supervisor brings the sidecars down and
+  # exits (0 iff every task finished successfully).
+  - name: app
+    role: task            # required: task | sidecar
+    command: /usr/local/bin/node
+    args: ["server.js"]
+    # restart: no | on-failure | always (default on-failure). Whether an exit
+    # warrants a restart — always = any exit, on-failure = exit != 0,
+    # no = never.
+    restart: on-failure
+    # Windowed crash-loop cap: give up only after max_restarts restarts WITHIN
+    # restart_window (a genuine hot-loop). A process that crashes occasionally
+    # but then runs healthily past the window gets a fresh budget. Equivalent
+    # to systemd StartLimitBurst / StartLimitIntervalSec. restart_window is
+    # required when restart != no and max_restarts > 0.
+    # max_restarts defaults to 0 (a zero budget: gives up on the first restart-
+    # warranting exit, even under on-failure/always), so set it explicitly
+    # whenever you want restarts to actually happen.
+    max_restarts: 3
+    restart_window: 60s
+    # on_failure: terminate | continue (default terminate). What happens when a
+    # process GIVES UP (restart-warranting exit with the budget exhausted, or a
+    # non-zero exit under restart: no): terminate = gracefully shut everything
+    # down and exit non-zero; continue = abandon just this process and keep the
+    # rest running (the supervisor still exits non-zero once all tasks settle).
+    on_failure: terminate
+
+  # The vsockd sidecar carrying the enclave's traffic. `sidecar` processes
+  # support the tasks; they do not by themselves keep the supervisor alive.
+  # `restart: always` keeps transport up for the lifetime of the tasks.
+  - name: vsockd
+    role: sidecar
+    command: /usr/local/bin/vsockd
+    args: ["-config", "/etc/vsockd/vsockd.yaml"]
+    restart: always
+    max_restarts: 5
+    restart_window: 60s
+    on_failure: terminate
+
+# Shutdown triggers — any of these begins graceful teardown, after which the
+# restart policy is SUSPENDED (so SIGTERM -> child exits does NOT trigger a
+# restart, which would keep the enclave alive forever):
+#   1. an external signal (SIGTERM/SIGINT) delivered to the supervisor;
+#   2. all tasks reaching a terminal state (done or abandoned);
+#   3. an on_failure: terminate give-up.
+# Teardown order: set shutting-down -> SIGTERM remaining children (SIGKILL
+# after a per-child timeout) -> drain pipes to EOF -> waitpid for exit records
+# -> best-effort flush the buffer to log_relay within the grace window ->
+# exit with the resolved code. Zero tasks = daemon mode: the supervisor runs
+# until an external signal or a terminate give-up.

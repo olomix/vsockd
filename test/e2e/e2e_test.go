@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -426,6 +427,156 @@ shutdown_grace: 2s
 			t.Errorf("body = %q, want new-route-ok", body)
 		}
 	})
+}
+
+// TestEndToEnd_LogRelay drives the log_relay path through app.New/app.Start
+// end-to-end: an enclave dials the log_relay vsock port over the loopback
+// backend and ships NDJSON, and vsockd splices host fields (the
+// un-spoofable peer cid plus configured host tags under a custom host_key)
+// into each record while preserving every original byte — including a large
+// int64 that a decode/re-encode would mangle. The enriched lines must land
+// in the configured file sink.
+func TestEndToEnd_LogRelay(t *testing.T) {
+	const logRelayVsockPort uint32 = 9200
+
+	reg := vsockconn.NewRegistry()
+	inboundDialer := vsockconn.NewLoopbackDialer(reg, hostCID)
+	outboundListen := outbound.ListenFunc(
+		func(port uint32) (vsockconn.Listener, error) {
+			return vsockconn.ListenLoopback(reg, 0, port)
+		})
+
+	dir := t.TempDir()
+	sinkPath := filepath.Join(dir, "enclave.ndjson")
+	cfgPath := filepath.Join(dir, "vsockd.yaml")
+	initial := fmt.Sprintf(`
+log_relay:
+  - port: %d
+    output: file
+    path: %s
+    enrich:
+      cid: true
+      host_key: host
+      tags:
+        region: us-east-1
+        instance: i-0abc123
+shutdown_grace: 2s
+`, logRelayVsockPort, sinkPath)
+	writeConfig(t, cfgPath, initial)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	a, err := app.New(app.Options{
+		ConfigPath:    cfgPath,
+		Config:        cfg,
+		Logger:        discardLogger(),
+		VsockDialer:   inboundDialer,
+		VsockListenFn: outboundListen,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		sctx, scancel := context.WithTimeout(
+			context.Background(), 3*time.Second)
+		defer scancel()
+		_ = a.Shutdown(sctx)
+	})
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("app.Start: %v", err)
+	}
+
+	// A pid larger than 2^53 would lose precision through a float64 decode;
+	// splice-not-reencode must carry it through byte-for-byte.
+	const bigPID int64 = 9007199254740993
+	enclaveDialer := vsockconn.NewLoopbackDialer(reg, enclaveCID)
+	c, err := enclaveDialer.Dial(0, logRelayVsockPort)
+	if err != nil {
+		t.Fatalf("enclave dial log_relay: %v", err)
+	}
+	lines := []string{
+		fmt.Sprintf(
+			`{"ts":"t0","pid":%d,"tags":{"service":"abc"},"msg":"hello"}`,
+			bigPID),
+		`not-json`,
+	}
+	for _, ln := range lines {
+		if _, err := c.Write([]byte(ln + "\n")); err != nil {
+			t.Fatalf("enclave write: %v", err)
+		}
+	}
+	// Closing the write side signals EOF so the relay flushes and the file
+	// is fully written before we read it back.
+	_ = c.Close()
+
+	// Poll for both enriched lines to land in the sink.
+	var got []string
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, rerr := os.ReadFile(sinkPath)
+		if rerr == nil {
+			got = nil
+			for ln := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+				if ln != "" {
+					got = append(got, ln)
+				}
+			}
+		}
+		if len(got) >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(got) != 2 {
+		t.Fatalf("sink lines = %d, want 2; content=%q", len(got), got)
+	}
+
+	// First line: spliced JSON object. Every output line must be valid
+	// NDJSON and carry the host enrichment.
+	var rec logRecord
+	if err := json.Unmarshal([]byte(got[0]), &rec); err != nil {
+		t.Fatalf("first line not valid JSON: %v (%q)", err, got[0])
+	}
+	if cidv, _ := rec["cid"].(float64); uint32(cidv) != enclaveCID {
+		t.Errorf("cid = %v, want %d (the un-spoofable peer CID)",
+			rec["cid"], enclaveCID)
+	}
+	host, ok := rec["host"].(map[string]any)
+	if !ok {
+		t.Fatalf("host object missing under host_key: %v", rec)
+	}
+	if host["region"] != "us-east-1" || host["instance"] != "i-0abc123" {
+		t.Errorf("host tags = %v, want region/instance", host)
+	}
+	// The enclave's own tags must be left untouched (no merge).
+	tags, _ := rec["tags"].(map[string]any)
+	if tags["service"] != "abc" {
+		t.Errorf("enclave tags mangled = %v", tags)
+	}
+	// The big pid must survive byte-for-byte (splice, not re-encode).
+	if !strings.Contains(got[0], strconv.FormatInt(bigPID, 10)) {
+		t.Errorf("int64 pid not preserved: %q", got[0])
+	}
+
+	// Second line: non-JSON input wrapped as a raw record, still enriched.
+	var raw logRecord
+	if err := json.Unmarshal([]byte(got[1]), &raw); err != nil {
+		t.Fatalf("raw line not valid JSON: %v (%q)", err, got[1])
+	}
+	if raw["type"] != "raw" {
+		t.Errorf("non-JSON line type = %v, want raw", raw["type"])
+	}
+	if raw["msg"] != "not-json" {
+		t.Errorf("raw msg = %v, want %q", raw["msg"], "not-json")
+	}
+	if cidv, _ := raw["cid"].(float64); uint32(cidv) != enclaveCID {
+		t.Errorf("raw record cid = %v, want %d", raw["cid"], enclaveCID)
+	}
 }
 
 // logRecord mirrors the unexported helper in the per-package tests: a

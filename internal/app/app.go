@@ -101,7 +101,7 @@ func New(opts Options) (*App, error) {
 		return nil, fmt.Errorf("inbound: %w", err)
 	}
 	out, err := outbound.NewServer(
-		opts.Config.Outbound, opts.Config.VsockToTCP,
+		opts.Config.Outbound, opts.Config.VsockToTCP, opts.Config.LogRelay,
 		opts.VsockListenFn, m, opts.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("outbound: %w", err)
@@ -251,7 +251,8 @@ func (a *App) Reload() error {
 		a.opts.Logger.Error("inbound reload failed", "err", err)
 		return err
 	}
-	outPlan, err := a.out.PrepareApply(cfg.Outbound, cfg.VsockToTCP)
+	outPlan, err := a.out.PrepareApply(
+		cfg.Outbound, cfg.VsockToTCP, cfg.LogRelay)
 	if err != nil {
 		inPlan.AbortApply()
 		a.metric.ConfigReloads.

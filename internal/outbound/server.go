@@ -1,7 +1,7 @@
 // Package outbound implements the vsock-facing proxy used by enclaves to
 // reach external destinations.
 //
-// Each configured listener listens on vsock and runs in one of two modes:
+// Each configured listener listens on vsock and runs in one of three modes:
 //
 //   - HTTP forward proxy (config.OutboundListener). Every accepted
 //     connection is authorized by peer CID before any bytes are read;
@@ -13,6 +13,12 @@
 //   - TCP passthrough (config.VsockToTCPListener). Accepted vsock
 //     connections are piped bidirectionally to a fixed upstream host:port.
 //     No HTTP parsing, no per-CID allowlist.
+//   - Log sink + enrichment (config.LogRelayListener). Accepted vsock
+//     connections carry an NDJSON stream read line by line; each record is
+//     enriched with host-only metadata (the peer CID and configured host
+//     tags, spliced in without re-encoding) and written to a local file or
+//     stdout sink. Line-aware rather than a raw byte copy; no per-CID
+//     allowlist. Handled serially per listener (single-producer v1).
 package outbound
 
 import (
@@ -48,11 +54,14 @@ const (
 
 // modeHTTPProxy labels listeners derived from config.OutboundListener
 // (the HTTP forward-proxy path). modeVsockToTCP labels listeners derived
-// from config.VsockToTCPListener (raw passthrough). These are internal
-// sentinels, not user-visible YAML values.
+// from config.VsockToTCPListener (raw passthrough). modeLogRelay labels
+// listeners derived from config.LogRelayListener (line-aware NDJSON sink
+// with host enrichment). These are internal sentinels, not user-visible
+// YAML values.
 const (
-	modeHTTPProxy   = ""
-	modeVsockToTCP  = "vsock_to_tcp"
+	modeHTTPProxy  = ""
+	modeVsockToTCP = "vsock_to_tcp"
+	modeLogRelay   = "log_relay"
 )
 
 // ListenFunc opens a vsock-style Listener on the given port. Production
@@ -96,6 +105,7 @@ type Server struct {
 func NewServer(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 	listenFn ListenFunc,
 	m *metrics.Metrics,
 	logger *slog.Logger,
@@ -130,7 +140,28 @@ func NewServer(
 		}
 		s.listeners = append(s.listeners, ln)
 	}
+	for i := range logRelayCfgs {
+		ln, err := newLogRelayListener(logRelayCfgs[i], s)
+		if err != nil {
+			// A log_relay listener opens its file sink at construction, so an
+			// error on a later listener must not leak the fds opened by the
+			// earlier ones in this same call.
+			s.closeLogRelaySinks()
+			return nil, fmt.Errorf("log_relay[%d]: %w", i, err)
+		}
+		s.listeners = append(s.listeners, ln)
+	}
 	return s, nil
+}
+
+// closeLogRelaySinks closes the sink of every log_relay listener built so
+// far. Used to roll back partially-constructed servers without leaking fds.
+func (s *Server) closeLogRelaySinks() {
+	for _, ln := range s.listeners {
+		if ln.mode == modeLogRelay {
+			ln.closeSink()
+		}
+	}
 }
 
 // Addr returns the bound address of the i-th configured listener, or nil
@@ -208,6 +239,14 @@ type applySwap struct {
 	// tearing down the accept loop. In-flight connections keep using the
 	// upstream they already dialed; new accepts pick up the replacement.
 	upstream *string
+	// relay is populated only when both the existing and new configs are
+	// log_relay on the same port. It carries the newly opened (refcounted)
+	// sink paired with the new enrichment; CommitApply installs the pair
+	// atomically and releases the listener's reference to the old sink, while
+	// an in-flight relay keeps the old pair until it finishes (plan
+	// decision 9). AbortApply releases relay.sink so the fd opened during
+	// staging never leaks.
+	relay *relayState
 }
 
 // PrepareApply validates the new outbound configuration, binds any newly
@@ -218,6 +257,7 @@ type applySwap struct {
 func (s *Server) PrepareApply(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 ) (*ApplyPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -231,7 +271,7 @@ func (s *Server) PrepareApply(
 		existing[ln.port] = ln
 	}
 
-	total := len(httpCfgs) + len(tcpCfgs)
+	total := len(httpCfgs) + len(tcpCfgs) + len(logRelayCfgs)
 	kept := make(map[uint32]bool, total)
 	next := make([]*listener, 0, total)
 	var swaps []applySwap
@@ -239,6 +279,13 @@ func (s *Server) PrepareApply(
 	cleanup := func() {
 		for _, ln := range newBinds {
 			ln.close()
+		}
+		// Release sinks opened for matched log_relay ports that will not be
+		// installed because staging failed (no fd leak).
+		for _, sw := range swaps {
+			if sw.relay != nil {
+				sw.relay.sink.release()
+			}
 		}
 	}
 
@@ -263,6 +310,15 @@ func (s *Server) PrepareApply(
 			if newLn.mode == modeVsockToTCP {
 				u := newLn.upstreamSnapshot()
 				sw.upstream = &u
+			}
+			if newLn.mode == modeLogRelay {
+				// newLogRelayListener already opened the new sink and paired it
+				// with the new enrichment; carry that state into the swap so
+				// CommitApply can install the pair atomically. cur keeps
+				// running; the new listener object is discarded after the swap.
+				// If staging fails or the plan is aborted, cleanup/AbortApply
+				// releases sw.relay.sink.
+				sw.relay = newLn.relay.Load()
 			}
 			swaps = append(swaps, sw)
 			kept[newLn.port] = true
@@ -296,6 +352,23 @@ func (s *Server) PrepareApply(
 		}
 		if err := apply("vsock_to_tcp", i, newLn); err != nil {
 			cleanup()
+			return nil, err
+		}
+	}
+	for i := range logRelayCfgs {
+		// newLogRelayListener opens the sink here, during staging. cleanup()
+		// and AbortApply release it if the reload does not commit, so a
+		// failed reload never leaks the fd.
+		newLn, err := newLogRelayListener(logRelayCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("log_relay[%d]: %w", i, err)
+		}
+		if err := apply("log_relay", i, newLn); err != nil {
+			cleanup()
+			// apply did not adopt newLn (mode-change error or bind failure);
+			// release the sink it opened so the fd does not leak.
+			newLn.closeSink()
 			return nil, err
 		}
 	}
@@ -335,6 +408,17 @@ func (p *ApplyPlan) CommitApply() {
 		if sw.upstream != nil {
 			sw.listener.replaceUpstream(*sw.upstream)
 		}
+		if sw.relay != nil {
+			// Install the new sink+enrichment pair for subsequent accepts,
+			// then release the listener's reference to the old sink. An
+			// in-flight relay that already acquired the old state keeps it
+			// until it finishes; the fd is closed only when that last
+			// reference drops.
+			old := sw.listener.relay.Swap(sw.relay)
+			if old != nil {
+				old.sink.release()
+			}
+		}
 	}
 	for _, ln := range p.newBinds {
 		s.wg.Add(1)
@@ -361,6 +445,13 @@ func (p *ApplyPlan) AbortApply() {
 	for _, ln := range p.newBinds {
 		ln.close()
 	}
+	// Release sinks opened for matched log_relay ports that are now being
+	// discarded, so a staged-but-not-committed reload leaks no fd.
+	for _, sw := range p.swaps {
+		if sw.relay != nil {
+			sw.relay.sink.release()
+		}
+	}
 	p.aborted = true
 }
 
@@ -370,8 +461,9 @@ func (p *ApplyPlan) AbortApply() {
 func (s *Server) Apply(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 ) error {
-	plan, err := s.PrepareApply(httpCfgs, tcpCfgs)
+	plan, err := s.PrepareApply(httpCfgs, tcpCfgs, logRelayCfgs)
 	if err != nil {
 		return err
 	}
@@ -458,6 +550,15 @@ type listener struct {
 	// listeners. Atomic so SIGHUP reloads can swap the destination without
 	// tearing down the vsock accept loop. Unused for HTTP-proxy listeners.
 	upstream atomic.Pointer[string]
+
+	// relay holds the live log_relay sink and enrichment config as one
+	// atomic unit so a SIGHUP reload swaps them together for new connections
+	// while an in-flight relay keeps the pair it started with (plan
+	// decision 9). Bundling them prevents a connection accepted mid-swap from
+	// pairing a new sink with old enrichment. Only populated for log_relay
+	// listeners. The per-line cap (max_line_bytes) lives inside relayState so a
+	// reload changing only that limit takes effect for new connections.
+	relay atomic.Pointer[relayState]
 }
 
 func newHTTPListener(
@@ -549,6 +650,9 @@ func (l *listener) close() {
 		if l.ln != nil {
 			_ = l.ln.Close()
 		}
+		// Release the file fd for a log_relay listener being torn down
+		// (shutdown or reload-removal). stdout sinks have a no-op Close.
+		l.closeSink()
 	})
 }
 
@@ -606,6 +710,15 @@ func (l *listener) run(ctx context.Context) {
 		var tcpUpstream string
 		if l.mode == modeVsockToTCP {
 			tcpUpstream = l.upstreamSnapshot()
+		}
+		if l.mode == modeLogRelay {
+			// Serial per listener (plan decision 4): handle inline so the
+			// accept loop processes one connection at a time. A single
+			// supervisor producer makes this the simplest correct design
+			// (one scanner, no sink write-side locking). This runs inside
+			// run()'s already-tracked goroutine, so no extra wg.Add.
+			l.handleLogRelay(ctx, c)
+			continue
 		}
 		l.server.wg.Add(1)
 		go func() {

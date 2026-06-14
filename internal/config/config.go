@@ -2,7 +2,11 @@
 //
 // The schema mirrors examples/vsockd.yaml. Load applies strict YAML parsing
 // (unknown fields rejected) followed by Validate. All constraints called out
-// in the implementation plan live here.
+// in the implementation plan live here. Besides the HTTP-aware inbound /
+// outbound listeners and the raw tcp_to_vsock / vsock_to_tcp passthroughs, the
+// schema covers log_relay: a host-side vsock log sink that reads enclave
+// NDJSON line by line, enriches each record with host-only metadata (peer CID
+// + host tags), and writes it to a local file or stdout.
 package config
 
 import (
@@ -37,6 +41,41 @@ const (
 	LogLevelInfo  = "info"
 )
 
+// log_relay output values; the YAML output field must be one of these.
+const (
+	LogRelayOutputFile   = "file"
+	LogRelayOutputStdout = "stdout"
+)
+
+// defaultMaxLineBytes bounds a single relayed NDJSON line. A value of 0 in
+// config means "use this default"; an over-long line is truncated-and-flagged
+// rather than silently dropped (see plan decision 8).
+const defaultMaxLineBytes = 1 << 20 // 1 MiB
+
+// minMaxLineBytes is the smallest enforceable max_line_bytes. The relay reads
+// lines with a buffered reader whose internal buffer has a 16-byte floor
+// (bufio's minReadBufferSize), so a smaller limit cannot be honored — lines up
+// to that floor would pass unflagged. Reject sub-floor values rather than
+// silently enforcing a larger bound than configured.
+const minMaxLineBytes = 16
+
+// defaultHostKey is the JSON object key under which host-only tags are emitted
+// when enrich.host_key is omitted.
+const defaultHostKey = "host"
+
+// relayReservedKeys are top-level JSON keys the relay itself emits and must own
+// exclusively. "type", "msg", and "truncated" are written by the raw-record
+// wrapper (which can fire for any non-object or over-long line), so they are
+// always reserved. "cid" is reserved only when enrich.cid is enabled. A
+// host_key colliding with one of these would make the relay emit duplicate
+// top-level keys from its own config, which the runtime duplicate-key guard
+// (it only scans the enclave record) cannot catch — so reject it here.
+var relayReservedKeys = map[string]struct{}{
+	"type":      {},
+	"msg":       {},
+	"truncated": {},
+}
+
 // VSOCK reserves CIDs 0..2 (hypervisor/local/host). Enclave CIDs start at 3.
 const minCID uint32 = 3
 
@@ -50,6 +89,7 @@ type Config struct {
 	Outbound      []OutboundListener   `yaml:"outbound"`
 	TCPToVsock    []TCPToVsockListener `yaml:"tcp_to_vsock"`
 	VsockToTCP    []VsockToTCPListener `yaml:"vsock_to_tcp"`
+	LogRelay      []LogRelayListener   `yaml:"log_relay"`
 	Metrics       MetricsConfig        `yaml:"metrics"`
 	ShutdownGrace Duration             `yaml:"shutdown_grace"`
 	LogFormat     string               `yaml:"log_format"`
@@ -103,6 +143,27 @@ type TCPToVsockListener struct {
 type VsockToTCPListener struct {
 	Port     uint32 `yaml:"port"`
 	Upstream string `yaml:"upstream"`
+}
+
+// LogRelayListener accepts vsock connections on the given vsock port, reads the
+// incoming NDJSON stream line-by-line, enriches each record with host-only
+// metadata, and writes the enriched lines to a local sink (a file or stdout).
+// It is the host-side endpoint for enclave log delivery.
+type LogRelayListener struct {
+	Port         uint32          `yaml:"port"`
+	Output       string          `yaml:"output"`
+	Path         string          `yaml:"path"`
+	MaxLineBytes int             `yaml:"max_line_bytes"`
+	Enrich       *LogRelayEnrich `yaml:"enrich"`
+}
+
+// LogRelayEnrich holds the host-only enrichment applied per record. The host
+// adds the un-spoofable peer CID (when CID is true) and a set of host tags
+// under HostKey; it deliberately does not merge into the enclave's own tags.
+type LogRelayEnrich struct {
+	CID     bool              `yaml:"cid"`
+	Tags    map[string]string `yaml:"tags"`
+	HostKey string            `yaml:"host_key"`
 }
 
 // MetricsConfig controls the Prometheus /metrics endpoint. Exactly one of
@@ -161,7 +222,8 @@ func Load(path string) (*Config, error) {
 // Validate enforces the semantic constraints from the implementation plan.
 func (c *Config) Validate() error {
 	if len(c.Inbound) == 0 && len(c.Outbound) == 0 &&
-		len(c.TCPToVsock) == 0 && len(c.VsockToTCP) == 0 {
+		len(c.TCPToVsock) == 0 && len(c.VsockToTCP) == 0 &&
+		len(c.LogRelay) == 0 {
 		return errors.New("config has no listeners configured")
 	}
 
@@ -256,6 +318,19 @@ func (c *Config) Validate() error {
 				i, p, prev)
 		}
 		seenPort[p] = fmt.Sprintf("vsock_to_tcp[%d]", i)
+	}
+
+	for i := range c.LogRelay {
+		if err := c.LogRelay[i].validate(); err != nil {
+			return fmt.Errorf("log_relay[%d]: %w", i, err)
+		}
+		p := c.LogRelay[i].Port
+		if prev, ok := seenPort[p]; ok {
+			return fmt.Errorf(
+				"log_relay[%d]: duplicate port %d already declared in %s",
+				i, p, prev)
+		}
+		seenPort[p] = fmt.Sprintf("log_relay[%d]", i)
 	}
 
 	switch c.LogFormat {
@@ -366,6 +441,67 @@ func (v *VsockToTCPListener) validate() error {
 	}
 	if err := validateHostPort(v.Upstream); err != nil {
 		return fmt.Errorf("upstream %w", err)
+	}
+	return nil
+}
+
+// validate checks one log_relay listener and applies defaults in place
+// (max_line_bytes and enrich.host_key) so downstream code reads ready values.
+func (l *LogRelayListener) validate() error {
+	if l.Port == 0 || l.Port >= vsockPortAny {
+		return fmt.Errorf("port %d out of range", l.Port)
+	}
+	switch l.Output {
+	case LogRelayOutputFile:
+		if l.Path == "" {
+			return fmt.Errorf("output %q requires a non-empty path",
+				LogRelayOutputFile)
+		}
+	case LogRelayOutputStdout:
+		if l.Path != "" {
+			return fmt.Errorf("output %q must not set a path",
+				LogRelayOutputStdout)
+		}
+	case "":
+		return fmt.Errorf("output must be %q or %q",
+			LogRelayOutputFile, LogRelayOutputStdout)
+	default:
+		return fmt.Errorf("output %q must be %q or %q",
+			l.Output, LogRelayOutputFile, LogRelayOutputStdout)
+	}
+	if l.MaxLineBytes < 0 {
+		return fmt.Errorf("max_line_bytes %d must be >= 0", l.MaxLineBytes)
+	}
+	if l.MaxLineBytes == 0 {
+		l.MaxLineBytes = defaultMaxLineBytes
+	} else if l.MaxLineBytes < minMaxLineBytes {
+		return fmt.Errorf("max_line_bytes %d must be 0 (default) or >= %d",
+			l.MaxLineBytes, minMaxLineBytes)
+	}
+	if l.Enrich != nil {
+		for k, v := range l.Enrich.Tags {
+			if k == "" {
+				return errors.New("enrich.tags has an empty key")
+			}
+			if v == "" {
+				return fmt.Errorf("enrich.tags[%q] has an empty value", k)
+			}
+		}
+		if l.Enrich.HostKey == "" {
+			l.Enrich.HostKey = defaultHostKey
+		}
+		// host_key is only emitted when there are tags to place under it.
+		if len(l.Enrich.Tags) > 0 {
+			if _, bad := relayReservedKeys[l.Enrich.HostKey]; bad {
+				return fmt.Errorf(
+					"enrich.host_key %q is reserved by the relay",
+					l.Enrich.HostKey)
+			}
+			if l.Enrich.CID && l.Enrich.HostKey == "cid" {
+				return errors.New(
+					`enrich.host_key "cid" collides with enrich.cid`)
+			}
+		}
 	}
 	return nil
 }

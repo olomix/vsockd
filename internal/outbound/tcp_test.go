@@ -101,7 +101,7 @@ func startTCPServer(
 	logger *slog.Logger,
 ) *Server {
 	t.Helper()
-	s, err := NewServer(nil, cfgs, listenFn, m, logger)
+	s, err := NewServer(nil, cfgs, nil, listenFn, m, logger)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestTCP_Passthrough_ContextCancelViaShutdown(t *testing.T) {
 		Port:     vsockPort,
 		Upstream: upstream.Addr().String(),
 	}}
-	s, err := NewServer(nil, cfgs, newLoopbackListenFunc(reg, hostCID), m,
+	s, err := NewServer(nil, cfgs, nil, newLoopbackListenFunc(reg, hostCID), m,
 		discardLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -706,7 +706,7 @@ func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
 		Port:     vsockPort,
 		Upstream: "127.0.0.1:9",
 	}}
-	err := s.Apply(nil, tcpCfg)
+	err := s.Apply(nil, tcpCfg, nil)
 	if err == nil {
 		t.Fatal("Apply with changed mode returned nil, want error")
 	}

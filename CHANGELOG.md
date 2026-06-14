@@ -21,12 +21,47 @@ metrics listener — old configs fail loudly at startup.
 - Top-level `vsock_to_tcp` YAML section — listens on a vsock port and
   forwards raw bytes to a fixed TCP upstream. Works identically on the
   host and inside the enclave.
+- Top-level `log_relay` YAML section — host-side vsock log sink. Accepts
+  vsock connections, reads the incoming NDJSON stream line by line,
+  enriches each record with host-only metadata (the un-spoofable peer
+  `cid` plus configurable host tags under `enrich.host_key`, default
+  `host`), and writes the enriched lines to a local file (`output: file`,
+  `path:`) or stdout (`output: stdout`). Records are spliced byte-for-byte
+  rather than re-encoded, so int64s and key order survive; the host data
+  is additive only — the enclave's own `tags` are never merged or
+  rewritten (reshaping is the downstream pipeline's job). Non-object and
+  over-long lines are wrapped as `raw` records (`max_line_bytes`, default
+  1 MiB) so output is always well-formed NDJSON. Participates in SIGHUP
+  reload (atomic sink/enrichment swap, reference-counted file fd) and the
+  `shutdown_grace` drain. New metrics: `log_relay_connections_total`,
+  `log_relay_lines_total`, `log_relay_bytes_total`, and
+  `log_relay_errors_total{reason}` (`sink_open` | `read_error` |
+  `line_too_long`).
 - `metrics.vsock_port` — expose `/metrics` over vsock
   (`VMADDR_CID_ANY`) so an enclave-side vsockd can be scraped from the
   parent host. Mutually exclusive with `metrics.bind`.
 - `examples/vsockd.service` — hardened example systemd unit. Matches
   `examples/vsockd.yaml` and sets `TimeoutStopSec=35s` to cover the
   default 30 s `shutdown_grace`.
+- `cmd/supervisor` — companion in-enclave process supervisor and the
+  producer side of the log channel `log_relay` consumes. It is PID 1's
+  child (`tini -g` stays PID 1), spawns and supervises the enclave's
+  processes (an application `task` plus a vsockd `sidecar`) under a
+  role/restart policy, captures their stdout/stderr plus its own
+  operational logs, frames every line as NDJSON tagged with
+  `src`/`pid`/`stream`, emits `start`/`exit` lifecycle events, and ships
+  the combined stream over its **own** vsock connection to the parent
+  (`log_cid:log_port`) — not through the vsockd sidecar, so vsockd's own
+  crash output is still captured. Per-process policy: `role: task |
+  sidecar` (required), `restart: no | on-failure | always` (default
+  `on-failure`), a windowed crash-loop cap (`max_restarts` within
+  `restart_window`), and `on_failure: terminate | continue` (default
+  `terminate`). The restart policy is suspended once shutdown begins; the
+  supervisor exits when all tasks settle (0 iff every task succeeded), on
+  an external signal, or on a `terminate` give-up. A bounded,
+  frame-granular ring buffer (drop-oldest, counted, emitted as a `drop`
+  record) keeps producers from ever blocking on the network. New
+  `examples/supervisor.yaml`.
 
 ### Fixed
 
