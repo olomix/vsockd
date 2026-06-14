@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/olomix/vsockd/internal/config"
 	"github.com/olomix/vsockd/internal/metrics"
@@ -32,6 +33,42 @@ const logRelayDefaultHostKey = "host"
 type sink interface {
 	io.Writer
 	Close() error
+}
+
+// refSink reference-counts a sink so a SIGHUP reload can swap a listener's
+// live sink while an in-flight relay keeps writing to the old one (plan
+// decision 9). The listener holds one reference; each in-flight handler
+// acquires its own for the lifetime of the connection. The underlying sink
+// is closed exactly once, when the last reference is released — so the old
+// file fd is released only after the in-flight relay using it finishes,
+// without ever closing it out from under that relay. stdout's Close is a
+// no-op, so refcounting a stdout sink is harmless.
+type refSink struct {
+	s  sink
+	mu sync.Mutex
+	n  int
+}
+
+func newRefSink(s sink) *refSink { return &refSink{s: s, n: 1} }
+
+// acquire takes an additional reference and returns the underlying sink.
+func (r *refSink) acquire() sink {
+	r.mu.Lock()
+	r.n++
+	r.mu.Unlock()
+	return r.s
+}
+
+// release drops one reference, closing the underlying sink when the last
+// reference goes away.
+func (r *refSink) release() {
+	r.mu.Lock()
+	r.n--
+	last := r.n == 0
+	r.mu.Unlock()
+	if last {
+		_ = r.s.Close()
+	}
 }
 
 // stdoutSinkWriter is where output:stdout listeners write. Package-level so
@@ -223,16 +260,18 @@ func newLogRelayListener(
 			WithLabelValues(metrics.LogRelayErrorSink).Inc()
 		return nil, err
 	}
-	l.sink.Store(&sk)
+	l.sink.Store(newRefSink(sk))
 	return l, nil
 }
 
-// closeSink closes the listener's sink if one is set. Safe to call on
-// non-log_relay listeners (no sink stored) and idempotent for stdout (no-op
-// Close). Closing a file sink twice returns an error that is ignored.
+// closeSink releases the listener's reference to its sink if one is set.
+// Safe to call on non-log_relay listeners (no sink stored). Swap(nil) makes
+// it idempotent: only the first caller gets the ref and releases it, and an
+// in-flight relay holding its own reference keeps the underlying sink open
+// until it finishes.
 func (l *listener) closeSink() {
-	if p := l.sink.Load(); p != nil {
-		_ = (*p).Close()
+	if rp := l.sink.Swap(nil); rp != nil {
+		rp.release()
 	}
 }
 
@@ -258,11 +297,16 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 		maxLine = defaultLogRelayMaxLine
 	}
 
-	sp := l.sink.Load()
-	if sp == nil {
+	// Acquire a reference for this connection's lifetime so a concurrent
+	// reload that swaps (or removes) the listener's sink does not close the
+	// fd this relay is still writing to (plan decision 9). The matching
+	// release runs after the loop returns.
+	rp := l.sink.Load()
+	if rp == nil {
 		return
 	}
-	sk := *sp
+	sk := rp.acquire()
+	defer rp.release()
 
 	br := bufio.NewReaderSize(c, maxLine)
 	var out bytes.Buffer

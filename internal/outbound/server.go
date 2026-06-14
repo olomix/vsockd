@@ -233,6 +233,15 @@ type applySwap struct {
 	// tearing down the accept loop. In-flight connections keep using the
 	// upstream they already dialed; new accepts pick up the replacement.
 	upstream *string
+	// sink and enrich are populated only when both the existing and new
+	// configs are log_relay on the same port. sink is the newly opened
+	// (refcounted) destination; CommitApply installs it and releases the
+	// listener's reference to the old sink, while an in-flight relay keeps
+	// the old sink open until it finishes (plan decision 9). enrich is the
+	// new per-connection enrichment for subsequent accepts. AbortApply
+	// releases sink so the fd opened during staging never leaks.
+	sink   *refSink
+	enrich *enrichConfig
 }
 
 // PrepareApply validates the new outbound configuration, binds any newly
@@ -243,6 +252,7 @@ type applySwap struct {
 func (s *Server) PrepareApply(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 ) (*ApplyPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -256,7 +266,7 @@ func (s *Server) PrepareApply(
 		existing[ln.port] = ln
 	}
 
-	total := len(httpCfgs) + len(tcpCfgs)
+	total := len(httpCfgs) + len(tcpCfgs) + len(logRelayCfgs)
 	kept := make(map[uint32]bool, total)
 	next := make([]*listener, 0, total)
 	var swaps []applySwap
@@ -264,6 +274,13 @@ func (s *Server) PrepareApply(
 	cleanup := func() {
 		for _, ln := range newBinds {
 			ln.close()
+		}
+		// Release sinks opened for matched log_relay ports that will not be
+		// installed because staging failed (no fd leak).
+		for _, sw := range swaps {
+			if sw.sink != nil {
+				sw.sink.release()
+			}
 		}
 	}
 
@@ -288,6 +305,15 @@ func (s *Server) PrepareApply(
 			if newLn.mode == modeVsockToTCP {
 				u := newLn.upstreamSnapshot()
 				sw.upstream = &u
+			}
+			if newLn.mode == modeLogRelay {
+				// newLogRelayListener already opened the new sink; carry it
+				// (and the new enrichment) into the swap so CommitApply can
+				// install both atomically. cur keeps running; the new listener
+				// object is discarded after the swap. If staging fails or the
+				// plan is aborted, cleanup/AbortApply releases sw.sink.
+				sw.sink = newLn.sink.Load()
+				sw.enrich = newLn.enrich.Load()
 			}
 			swaps = append(swaps, sw)
 			kept[newLn.port] = true
@@ -321,6 +347,23 @@ func (s *Server) PrepareApply(
 		}
 		if err := apply("vsock_to_tcp", i, newLn); err != nil {
 			cleanup()
+			return nil, err
+		}
+	}
+	for i := range logRelayCfgs {
+		// newLogRelayListener opens the sink here, during staging. cleanup()
+		// and AbortApply release it if the reload does not commit, so a
+		// failed reload never leaks the fd.
+		newLn, err := newLogRelayListener(logRelayCfgs[i], s)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("log_relay[%d]: %w", i, err)
+		}
+		if err := apply("log_relay", i, newLn); err != nil {
+			cleanup()
+			// apply did not adopt newLn (mode-change error or bind failure);
+			// release the sink it opened so the fd does not leak.
+			newLn.closeSink()
 			return nil, err
 		}
 	}
@@ -360,6 +403,17 @@ func (p *ApplyPlan) CommitApply() {
 		if sw.upstream != nil {
 			sw.listener.replaceUpstream(*sw.upstream)
 		}
+		if sw.sink != nil {
+			// Install the new sink/enrichment for subsequent accepts, then
+			// release the listener's reference to the old sink. An in-flight
+			// relay that already acquired the old sink keeps it open until it
+			// finishes; the fd is closed only when that last reference drops.
+			sw.listener.enrich.Store(sw.enrich)
+			old := sw.listener.sink.Swap(sw.sink)
+			if old != nil {
+				old.release()
+			}
+		}
 	}
 	for _, ln := range p.newBinds {
 		s.wg.Add(1)
@@ -386,6 +440,13 @@ func (p *ApplyPlan) AbortApply() {
 	for _, ln := range p.newBinds {
 		ln.close()
 	}
+	// Release sinks opened for matched log_relay ports that are now being
+	// discarded, so a staged-but-not-committed reload leaks no fd.
+	for _, sw := range p.swaps {
+		if sw.sink != nil {
+			sw.sink.release()
+		}
+	}
 	p.aborted = true
 }
 
@@ -395,8 +456,9 @@ func (p *ApplyPlan) AbortApply() {
 func (s *Server) Apply(
 	httpCfgs []config.OutboundListener,
 	tcpCfgs []config.VsockToTCPListener,
+	logRelayCfgs []config.LogRelayListener,
 ) error {
-	plan, err := s.PrepareApply(httpCfgs, tcpCfgs)
+	plan, err := s.PrepareApply(httpCfgs, tcpCfgs, logRelayCfgs)
 	if err != nil {
 		return err
 	}
@@ -489,7 +551,7 @@ type listener struct {
 	// while an in-flight relay keeps the ones it started with (plan
 	// decision 9). Only populated for log_relay listeners. maxLineBytes
 	// bounds a single relayed NDJSON line.
-	sink         atomic.Pointer[sink]
+	sink         atomic.Pointer[refSink]
 	enrich       atomic.Pointer[enrichConfig]
 	maxLineBytes int
 }

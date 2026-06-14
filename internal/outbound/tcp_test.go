@@ -706,7 +706,7 @@ func TestTCP_Passthrough_ApplyModeChangeRejected(t *testing.T) {
 		Port:     vsockPort,
 		Upstream: "127.0.0.1:9",
 	}}
-	err := s.Apply(nil, tcpCfg)
+	err := s.Apply(nil, tcpCfg, nil)
 	if err == nil {
 		t.Fatal("Apply with changed mode returned nil, want error")
 	}

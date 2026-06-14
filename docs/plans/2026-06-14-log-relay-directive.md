@@ -257,21 +257,25 @@ inject host fields per record.
 
 ### Task 4: Support `log_relay` in SIGHUP reload (add/remove/swap)
 
-- [ ] write tests first: reload that adds a `log_relay` listener starts
+- [x] write tests first: reload that adds a `log_relay` listener starts
       accepting on the new port; reload that removes one closes the listener and
       its file sink; reload that changes `path` or `enrich` on an existing port
       routes new connections to the new sink/enrichment while an in-flight relay
       keeps the old ones; a port mode change (`vsock_to_tcp` → `log_relay`) is
       rejected, matching existing behavior.
-- [ ] extend `applySwap` + the `ApplyPlan` build in `PrepareApply` to carry a
+      (`internal/outbound/logrelay_reload_test.go`)
+- [x] extend `applySwap` + the `ApplyPlan` build in `PrepareApply` to carry a
       new `sink` and `enrichConfig` for matched `log_relay` ports, mirroring the
-      `upstream` swap; `PrepareApply` must accept `cfg.LogRelay`.
-- [ ] in `CommitApply`, atomically replace sink + enrich on swapped listeners;
+      `upstream` swap; `PrepareApply` must accept `cfg.LogRelay`. The sink is
+      reference-counted (`refSink`) so an in-flight relay holding the old sink
+      keeps it open until it finishes — the fd closes only when the last
+      reference drops, satisfying decision 9 without leaking.
+- [x] in `CommitApply`, atomically replace sink + enrich on swapped listeners;
       ensure removed `log_relay` listeners close their sink; `AbortApply` closes
       any sink opened for a not-yet-committed listener (no fd leak).
-- [ ] update `internal/app/app.go` `Reload` to pass `cfg.LogRelay` into
+- [x] update `internal/app/app.go` `Reload` to pass `cfg.LogRelay` into
       `out.PrepareApply`.
-- [ ] run `go test ./internal/outbound/... ./internal/app/...` — must pass
+- [x] run `go test ./internal/outbound/... ./internal/app/...` — must pass
       before Task 5.
 
 ### Task 5: Verify acceptance criteria
