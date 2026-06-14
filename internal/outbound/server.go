@@ -1,7 +1,7 @@
 // Package outbound implements the vsock-facing proxy used by enclaves to
 // reach external destinations.
 //
-// Each configured listener listens on vsock and runs in one of two modes:
+// Each configured listener listens on vsock and runs in one of three modes:
 //
 //   - HTTP forward proxy (config.OutboundListener). Every accepted
 //     connection is authorized by peer CID before any bytes are read;
@@ -13,6 +13,12 @@
 //   - TCP passthrough (config.VsockToTCPListener). Accepted vsock
 //     connections are piped bidirectionally to a fixed upstream host:port.
 //     No HTTP parsing, no per-CID allowlist.
+//   - Log sink + enrichment (config.LogRelayListener). Accepted vsock
+//     connections carry an NDJSON stream read line by line; each record is
+//     enriched with host-only metadata (the peer CID and configured host
+//     tags, spliced in without re-encoding) and written to a local file or
+//     stdout sink. Line-aware rather than a raw byte copy; no per-CID
+//     allowlist. Handled serially per listener (single-producer v1).
 package outbound
 
 import (

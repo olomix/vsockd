@@ -2,7 +2,11 @@
 //
 // The schema mirrors examples/vsockd.yaml. Load applies strict YAML parsing
 // (unknown fields rejected) followed by Validate. All constraints called out
-// in the implementation plan live here.
+// in the implementation plan live here. Besides the HTTP-aware inbound /
+// outbound listeners and the raw tcp_to_vsock / vsock_to_tcp passthroughs, the
+// schema covers log_relay: a host-side vsock log sink that reads enclave
+// NDJSON line by line, enriches each record with host-only metadata (peer CID
+// + host tags), and writes it to a local file or stdout.
 package config
 
 import (

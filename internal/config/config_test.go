@@ -942,6 +942,9 @@ func TestLoadExample(t *testing.T) {
 	if len(cfg.VsockToTCP) == 0 {
 		t.Fatalf("example should have at least one vsock_to_tcp listener")
 	}
+	if len(cfg.LogRelay) == 0 {
+		t.Fatalf("example should have at least one log_relay listener")
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {

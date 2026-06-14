@@ -308,20 +308,23 @@ inject host fields per record.
 
 ### Task 6: Update documentation
 
-- [ ] add a documented `log_relay` section to `examples/vsockd.yaml` (a file
+- [x] add a documented `log_relay` section to `examples/vsockd.yaml` (a file
       sink with `enrich` cid+tags+`host_key`, and a stdout sink) covering
       `output`/`path` rules, the `enrich` namespaces and configurable
       `host_key`, `max_line_bytes`, the single-producer expectation, and the
-      stdout stream-muxing caveat.
-- [ ] document the **deliberate no-merge / additive-only** decision (in
+      stdout stream-muxing caveat. (TestLoadExample now also asserts the
+      example has a log_relay listener, guarding against drift.)
+- [x] document the **deliberate no-merge / additive-only** decision (in
       `examples/vsockd.yaml` comments and the README): vsockd adds `cid` and the
       host-tags object alongside the enclave's record without merging into or
       rewriting `tags`; any reshaping/flattening/merging is the downstream
       log-processing pipeline's responsibility, intentionally outside vsockd.
-- [ ] update `README.md` directive list/section if it enumerates directives.
-- [ ] update the `outbound` package doc and `config.go` package doc to mention
+- [x] update `README.md` directive list/section if it enumerates directives.
+      (Added a "What it does" bullet, a minimal-config snippet, a dedicated
+      "Log relay" section, metrics-table rows, and the SIGHUP reload note.)
+- [x] update the `outbound` package doc and `config.go` package doc to mention
       the log-sink/enrichment mode.
-- [ ] add a `CHANGELOG.md` entry.
+- [x] add a `CHANGELOG.md` entry.
 
 ## Technical Details
 

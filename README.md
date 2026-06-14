@@ -32,6 +32,14 @@ per-CID outbound egress allowlist.
   that means enclave vsock out to an external TCP service; inside the
   enclave it lets an enclave-local vsockd forward to a TCP service on the
   parent host. Also no application-layer parsing.
+- **Log sink + enrichment (`log_relay`).** Host-side endpoint for enclave
+  log delivery. Accepts vsock connections, reads the incoming NDJSON
+  stream line by line, enriches each record with host-only metadata (the
+  un-spoofable peer CID plus configurable host tags), and writes the
+  enriched lines to a local file or stdout. Unlike `vsock_to_tcp`'s raw
+  byte copy it is line-aware, so it can inject host fields per record; a
+  delivery agent or journald takes over from the sink. See
+  [log relay](#log-relay-vsock-log-sink--enrichment-log_relay).
 
 Multiple enclaves may share the same inbound host port under distinct
 hostnames. The same CID may NOT appear under more than one outbound port —
@@ -176,6 +184,17 @@ tcp_to_vsock:
 vsock_to_tcp:
   - port: 9000
     upstream: 10.0.0.5:5432
+
+# Host-side log sink: read enclave NDJSON, enrich each record with the peer
+# CID and host tags, write to a local file (or stdout).
+log_relay:
+  - port: 5140
+    output: file
+    path: /var/log/enclave/app.ndjson
+    enrich:
+      cid: true
+      tags:
+        region: us-east-1
 
 metrics:
   bind: 0.0.0.0:9090         # TCP form (host side)
@@ -354,6 +373,102 @@ host-side vsockd, and out to the approved upstream. The mirror direction
 (anything the enclave needs to accept from the host over a non-HTTP
 protocol) uses `vsock_to_tcp` in the enclave's config.
 
+## Log relay (vsock log sink + enrichment) (`log_relay`)
+
+Inside an AWS Nitro Enclave, stdout/stderr only reaches the enclave console,
+readable solely via `nitro-cli console --debug-mode`, which zeroes attestation
+PCRs and is unusable in production. vsock to the parent is the only channel
+out. `log_relay` is the host-side receiver for that channel: an in-enclave
+supervisor (separate component) connects out to the parent (CID 3) on the
+configured port and ships framed NDJSON; `log_relay` enriches each record and
+lands it on the host, where a delivery agent (CloudWatch agent / vector /
+fluent-bit) or journald takes over.
+
+Unlike `vsock_to_tcp`'s raw byte copy, `log_relay` is **line-aware**: it reads
+the connection line by line and emits one enriched line per input line, so it
+can inject host-only fields per record.
+
+```yaml
+log_relay:
+  - port: 5140
+    output: file                 # file | stdout
+    path: /var/log/enclave/app.ndjson   # required iff output: file
+    max_line_bytes: 1048576      # optional; default 1 MiB
+    enrich:
+      cid: true                  # add top-level "cid": <peer CID>
+      host_key: host             # optional; key for host tags (default "host")
+      tags:                      # host-only metadata, emitted under host_key
+        region: us-east-1
+        instance: i-0abc123
+  - port: 5141
+    output: stdout               # no enrich → framed pass-through
+```
+
+**Two-layer enrichment, additive only — no merging (deliberate).** Each side
+adds what only it knows, in its own namespace:
+
+- the **supervisor** (inside the enclave) owns `tags` — identity it knows from
+  within, e.g. `service`, `version`;
+- **`log_relay`** (on the host) adds the un-spoofable peer `cid` and a
+  host-tags object the enclave cannot see (region, instance, …), emitted under
+  a configurable key (`enrich.host_key`, default `host`).
+
+vsockd deliberately does **not** merge host data into the enclave's `tags`, or
+rewrite the record in any way. Merging would force a full JSON decode and
+re-encode — which mangles values (every number becomes a float64, so int64
+pids/timestamps lose precision) and reorders keys — and would impose a
+collision policy that is not vsockd's to decide. Instead, if a line is a valid
+JSON object, vsockd **splices** the precomputed host prefix
+(`"cid":N,"<host_key>":{…},`) in right after the opening brace, preserving
+every original byte:
+
+```json
+// from the supervisor (it owns "tags"):
+{"ts":"…","src":"app","pid":42,"tags":{"service":"abc","version":"1.1.2"},"type":"log","msg":"…"}
+// after vsockd splices host fields (it adds "cid" + host_key; "tags" untouched):
+{"cid":16,"host":{"region":"us-east-1","instance":"i-0abc123"},"ts":"…","src":"app","pid":42,"tags":{"service":"abc","version":"1.1.2"},"type":"log","msg":"…"}
+```
+
+Any reshaping, flattening, or merging of these namespaces belongs to the
+downstream log-processing pipeline, intentionally outside vsockd's scope.
+
+Behavior and rules:
+
+- **`output` is required**, one of `file` or `stdout`. `path` is required iff
+  `output: file` and must be absent for `output: stdout`. These are strict,
+  fail-loud validation errors at load time.
+- **Always well-formed NDJSON.** A line that is not a valid JSON object is
+  wrapped as a `raw` record carrying the original text in `msg`
+  (`{"cid":N,"<host_key>":{…},"type":"raw","msg":<quoted>}`).
+- **Bounded line length.** `max_line_bytes` (default 1 MiB) caps a single
+  line; an over-long line is never silently dropped — it is emitted as a
+  truncated `raw` record (with a `truncated:true` marker) and counted.
+- **Optional `enrich`.** With no `enrich` block the listener still emits
+  framed, bounded NDJSON but adds no `cid`/host tags (line-framed
+  pass-through).
+- **stdout caveat.** Picking `output: stdout` means relayed logs share
+  vsockd's own process stdout; vsockd's slog still goes to stderr, but mixing
+  the two on stdout is a documented consequence — prefer a file sink if that
+  matters.
+- **Single producer (v1).** Each listener handles one connection at a time
+  (the expected single in-enclave supervisor). Because each emitted line is
+  complete and self-describing (carries its own `cid`), concurrent connections
+  from multiple CIDs are a clean future relaxation, out of scope for v1.
+
+`log_relay` participates in the same SIGHUP reload and `shutdown_grace` drain
+as the other listeners. On a same-port reload the sink and enrichment are
+swapped atomically — new connections use the new sink/tags, an in-flight relay
+keeps the ones it started with until its connection closes (the file fd is
+reference-counted and closes only when the last user finishes). Added and
+removed ports bind and close normally. A peer that connects is relayed with no
+allowlist or per-CID auth — same trust model as `vsock_to_tcp`. `log_relay`
+ports share the same vsock-port uniqueness namespace as outbound /
+`vsock_to_tcp` / `metrics.vsock_port`; a collision is rejected at load.
+
+Metrics: `log_relay_connections_total`, `log_relay_lines_total`,
+`log_relay_bytes_total`, and `log_relay_errors_total{reason}` (`sink_open` |
+`read_error` | `line_too_long`).
+
 ## Metrics
 
 vsockd exposes Prometheus metrics at `/metrics`. The endpoint is
@@ -399,6 +514,10 @@ and forces the TCP transport.
 | `vsock_to_tcp_connections_total` | — | vsock connections accepted on `vsock_to_tcp` listeners. |
 | `vsock_to_tcp_bytes_total` | `direction` | Bytes proxied on `vsock_to_tcp` connections; `direction` is `up` or `down`. |
 | `vsock_to_tcp_errors_total` | `reason` | `vsock_to_tcp` errors; `reason` is `dial_fail` or `copy_error`. |
+| `log_relay_connections_total` | — | vsock connections accepted on `log_relay` listeners. |
+| `log_relay_lines_total` | — | NDJSON lines emitted to a `log_relay` sink. |
+| `log_relay_bytes_total` | — | Bytes written to `log_relay` sinks. |
+| `log_relay_errors_total` | `reason` | `log_relay` errors; `reason` is `sink_open`, `read_error`, or `line_too_long`. |
 | `config_reloads_total` | `result` | SIGHUP reload attempts; `result` is `success` or `failure`. |
 
 Label cardinality is bounded by the config. `route` is the hostname from the
@@ -417,7 +536,10 @@ are ever used as label values.
   route/CID tables atomically, and a `vsock_to_tcp` listener kept at the
   same vsock port atomically picks up a new `upstream` — new connections
   see the new rules or upstream, in-flight connections keep the values
-  they started with. Listeners in `tcp_to_vsock` cannot change `vsock_cid`
+  they started with. A `log_relay` listener kept at the same vsock port
+  atomically swaps its sink and enrichment the same way; an in-flight
+  relay keeps the old sink open (reference-counted) until its connection
+  closes. Listeners in `tcp_to_vsock` cannot change `vsock_cid`
   / `vsock_port` at runtime: a reload that edits them on an already-bound
   bind:port is rejected with a "restart required" error, and the running
   listener keeps forwarding to the original target. Changing the `mode`
