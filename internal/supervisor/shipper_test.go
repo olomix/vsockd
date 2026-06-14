@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -255,6 +256,97 @@ func TestShipperReconnectsOnBrokenConnection(t *testing.T) {
 	defer conn2.Close()
 	if got := readLines(t, conn2, 1); got[0]["msg"] != "second" {
 		t.Fatalf("frame 2 msg = %v", got[0]["msg"])
+	}
+}
+
+// failWriteConn is a net.Conn whose Write always fails, simulating a peer that
+// dies after the loopback handshake (which Dial already completed) but before
+// any frame is delivered.
+type failWriteConn struct{ net.Conn }
+
+func (failWriteConn) Write([]byte) (int, error) {
+	return 0, errors.New("simulated write failure")
+}
+
+// failFirstWriteDialer wraps a dialer so the first successfully-dialed
+// connection fails on every write; later connections behave normally. Dials
+// that fail at the inner dialer (e.g. no listener yet) are not counted.
+type failFirstWriteDialer struct {
+	inner vsockconn.Dialer
+	mu    sync.Mutex
+	dials int
+}
+
+func (d *failFirstWriteDialer) Dial(cid, port uint32) (net.Conn, error) {
+	c, err := d.inner.Dial(cid, port)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.dials++
+	first := d.dials == 1
+	d.mu.Unlock()
+	if first {
+		return failWriteConn{Conn: c}, nil
+	}
+	return c, nil
+}
+
+// TestShipperRedeliversDropRecordAcrossBrokenConnection covers the hardest case
+// of decision 8 (loss observable exactly once): the connection breaks while the
+// drop record itself is being emitted. The count must survive to the next
+// connection rather than being lost or double-counted.
+func TestShipperRedeliversDropRecordAcrossBrokenConnection(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	dialer := &failFirstWriteDialer{inner: vsockconn.NewLoopbackDialer(reg, testSourceCID)}
+	// Capacity 3: with no listener yet, enqueuing 5 frames drops the 2 oldest.
+	buf := supervisor.NewRingBuffer(0, 3)
+	s := supervisor.NewShipper(buf, shipperFramer(), dialer, nil, fastShipperCfg())
+	_, stop := runShipper(s)
+	defer stop()
+
+	for i := range 5 {
+		s.Enqueue([]byte(`{"type":"log","msg":"` + string(rune('a'+i)) + "\"}\n"))
+	}
+
+	ln, err := vsockconn.ListenLoopback(reg, testLogCID, testLogPort)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	// First connection: the drop-record write fails, so the peer sees no frame
+	// before the shipper drops the connection and reconnects.
+	conn1, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("accept 1: %v", err)
+	}
+	_ = conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := bufio.NewReader(conn1).ReadBytes('\n'); err == nil {
+		t.Fatal("expected no frame on the broken connection")
+	}
+	_ = conn1.Close()
+
+	// Second connection: the drop record (count=2) is redelivered exactly once,
+	// ahead of the 3 surviving frames.
+	conn2, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("accept 2: %v", err)
+	}
+	defer conn2.Close()
+
+	frames := readLines(t, conn2, 4)
+	drop := frames[0]
+	if drop["type"] != supervisor.TypeDrop {
+		t.Fatalf("first frame type = %v, want drop", drop["type"])
+	}
+	if drop["count"].(float64) != 2 {
+		t.Fatalf("drop count = %v, want 2", drop["count"])
+	}
+	for i, want := range []string{"c", "d", "e"} {
+		if frames[i+1]["msg"] != want {
+			t.Fatalf("survivor %d msg = %v, want %q", i, frames[i+1]["msg"], want)
+		}
 	}
 }
 

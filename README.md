@@ -577,6 +577,20 @@ See [`examples/supervisor.yaml`](examples/supervisor.yaml) for a fully
 annotated config (a `task` app + a vsockd `sidecar`, `log_port` matching the
 `log_relay` example above). The schema is in `internal/supervisor/config.go`.
 
+The `supervisor` binary is separate from `vsockd` and is not produced by
+`make build`. Build it directly:
+
+```
+CGO_ENABLED=0 go build -o supervisor ./cmd/supervisor
+```
+
+Command-line flags:
+
+- `-config PATH` — path to the YAML config. Default
+  `/etc/supervisor/supervisor.yaml`.
+- `-debug` — enable debug-level logging.
+- `-version` — print the version and exit.
+
 ## Metrics
 
 vsockd exposes Prometheus metrics at `/metrics`. The endpoint is
