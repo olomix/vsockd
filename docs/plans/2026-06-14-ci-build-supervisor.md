@@ -72,10 +72,10 @@ The binary is `supervisor` (from `./cmd/supervisor`).
 
 ### Task 3: Verify acceptance criteria
 
-- [ ] re-run `actionlint` on the workflow and `go vet ./...` — both clean.
-- [ ] confirm `make build` builds both binaries and `git status` shows no stray
+- [x] re-run `actionlint` on the workflow and `go vet ./...` — both clean.
+- [x] confirm `make build` builds both binaries and `git status` shows no stray
       tracked artifacts (both binary names are git-ignored).
-- [ ] confirm the workflow's `release` `files:` list now references all eight
+- [x] confirm the workflow's `release` `files:` list now references all eight
       artifacts (4 vsockd + 4 supervisor).
 
 ## Technical Details
