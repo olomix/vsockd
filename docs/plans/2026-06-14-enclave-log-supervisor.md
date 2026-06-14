@@ -261,18 +261,18 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 7: `cmd/supervisor` main wiring
 
-- [ ] write tests first: an end-to-end test that loads a small config, runs the
+- [x] write tests first: an end-to-end test that loads a small config, runs the
       supervisor against helper processes with a loopback log listener, and
       asserts the full NDJSON stream (lifecycle + child logs + supervisor's own
       logs) is received; all tasks exiting 0 brings sidecars down with
       supervisor exit 0; a `terminate` give-up exits non-zero; SIGTERM shuts
       everything down within grace, exit 0.
-- [ ] add `cmd/supervisor/main.go`: flag/config parsing, build the clock/dialer
+- [x] add `cmd/supervisor/main.go`: flag/config parsing, build the clock/dialer
       (prod `NewVsockDialer`, loopback for tests), wire config → buffer →
       shipper → slog handler → manager, install the signal handler, run, flush
       on shutdown, and propagate the resolved exit code. Mirror
       `cmd/vsockd/main.go` structure.
-- [ ] run `go test ./cmd/supervisor/... ./internal/supervisor/...` — pass
+- [x] run `go test ./cmd/supervisor/... ./internal/supervisor/...` — pass
       before Task 8.
 
 ### Task 8: Verify acceptance criteria
