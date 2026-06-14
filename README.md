@@ -41,6 +41,12 @@ per-CID outbound egress allowlist.
   delivery agent or journald takes over from the sink. See
   [log relay](#log-relay-vsock-log-sink--enrichment-log_relay).
 
+This repo also ships a companion **`supervisor`** binary — the in-enclave
+producer for that log channel. It supervises the enclave's processes, frames
+their stdout/stderr (and its own logs) as NDJSON, and ships the stream over
+vsock to a host-side `log_relay`. See
+[enclave log supervisor](#enclave-log-supervisor-cmdsupervisor).
+
 Multiple enclaves may share the same inbound host port under distinct
 hostnames. The same CID may NOT appear under more than one outbound port —
 this is enforced at config-load time.
@@ -493,6 +499,83 @@ ports share the same vsock-port uniqueness namespace as outbound /
 Metrics: `log_relay_connections_total`, `log_relay_lines_total`,
 `log_relay_bytes_total`, and `log_relay_errors_total{reason}` (`sink_open` |
 `read_error` | `line_too_long`).
+
+## Enclave log supervisor (`cmd/supervisor`)
+
+`log_relay` is the host-side **consumer** of the enclave log channel; the
+`supervisor` binary in this repo is the in-enclave **producer**. It is PID 1's
+child (`tini -g` stays PID 1) and spawns and supervises the enclave's
+processes — typically the application `task` plus a vsockd `sidecar` — under a
+role/restart policy. It captures each process's stdout/stderr, frames every
+line as NDJSON tagged with `src`/`pid`/`stream`, emits process lifecycle events
+(`start`/`exit`), and ships the combined stream over its **own** vsock
+connection to the parent (`log_cid:log_port`), where `log_relay` receives it.
+
+```
+                              enclave                          host
+   ┌──────────────────────────────────────────┐
+   │ tini -g (PID 1)                            │
+   │   └─ supervisor                            │
+   │        ├─ spawn app (task), capture stdio  │
+   │        ├─ spawn vsockd (sidecar), capture  │
+   │        └─ frame NDJSON + own logs ─────────┼─ vsock(log_cid, log_port) ─▶ log_relay
+   └──────────────────────────────────────────┘                              (file / stdout)
+```
+
+The supervisor opens its **own** vsock connection for logs rather than routing
+through the vsockd sidecar — deliberately, so it can still capture and ship
+**vsockd's own crash output**. The enclave-side vsockd dying does not affect
+log shipping.
+
+**It ships its own logs too.** Inside the enclave the supervisor's own
+operational logs (startup, each spawn, restart with attempt count, give-up,
+shutdown reason, exit codes) face the same blackout as everything else. A
+custom `slog.Handler` frames them as `log` records with `src:"supervisor"` and
+enqueues them onto the same ring buffer as child output, so they ship over the
+same channel. They are also mirrored to stderr — the only path before the
+buffer exists (e.g. a config-load failure) and a `--debug-mode` console
+fallback.
+
+**Roles and restart policy** (modelled on systemd `Restart=` / Docker restart
+policies):
+
+- `role: task | sidecar` (**required**). *tasks* are what the supervisor exists
+  to run to completion; *sidecars* support them. When **all tasks** reach a
+  terminal state the supervisor shuts the sidecars down and exits — 0 iff every
+  task finished successfully. Zero tasks = daemon mode (runs until an external
+  signal or a `terminate` give-up).
+- `restart: no | on-failure | always` (default `on-failure`) — whether an exit
+  warrants a restart: `always` = any exit, `on-failure` = exit ≠ 0, `no` =
+  never.
+- `max_restarts` + `restart_window` — a **windowed** crash-loop cap: a process
+  gives up only after `max_restarts` restarts *within* `restart_window` (a
+  genuine hot-loop), so a process that crashes occasionally but then runs
+  healthily past the window gets a fresh budget.
+- `on_failure: terminate | continue` (default `terminate`) — what happens when
+  a process *gives up*: `terminate` = gracefully shut everything down and exit
+  non-zero; `continue` = abandon just this process and keep the rest running.
+
+**Shutdown.** Any of three triggers begins teardown: an external signal
+(`tini -g` delivers `SIGTERM`/`SIGINT` to the children directly — the
+supervisor does **not** forward them, but handles its own to begin shutdown),
+all tasks settling, or an `on_failure: terminate` give-up. Once teardown
+begins the restart policy is **suspended** — otherwise `SIGTERM` → child exits
+→ "restart" would keep the enclave alive forever. The supervisor then
+`SIGTERM`s the remaining children (escalating to `SIGKILL` after a per-child
+timeout), drains their pipes to EOF, records `exit` events, best-effort
+flushes the buffer to `log_relay` within a grace window, and exits with the
+resolved code.
+
+**Loss policy.** A bounded, frame-granular ring buffer decouples producers
+from the network: producers never block. While `log_relay` is down frames
+accumulate; on overflow the oldest *whole* frames are dropped (never
+mid-frame, which would corrupt NDJSON) and counted, and a
+`{"type":"drop","count":N}` record is emitted on the next successful send so
+loss is observable downstream.
+
+See [`examples/supervisor.yaml`](examples/supervisor.yaml) for a fully
+annotated config (a `task` app + a vsockd `sidecar`, `log_port` matching the
+`log_relay` example above). The schema is in `internal/supervisor/config.go`.
 
 ## Metrics
 

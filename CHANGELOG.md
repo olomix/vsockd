@@ -43,6 +43,25 @@ metrics listener — old configs fail loudly at startup.
 - `examples/vsockd.service` — hardened example systemd unit. Matches
   `examples/vsockd.yaml` and sets `TimeoutStopSec=35s` to cover the
   default 30 s `shutdown_grace`.
+- `cmd/supervisor` — companion in-enclave process supervisor and the
+  producer side of the log channel `log_relay` consumes. It is PID 1's
+  child (`tini -g` stays PID 1), spawns and supervises the enclave's
+  processes (an application `task` plus a vsockd `sidecar`) under a
+  role/restart policy, captures their stdout/stderr plus its own
+  operational logs, frames every line as NDJSON tagged with
+  `src`/`pid`/`stream`, emits `start`/`exit` lifecycle events, and ships
+  the combined stream over its **own** vsock connection to the parent
+  (`log_cid:log_port`) — not through the vsockd sidecar, so vsockd's own
+  crash output is still captured. Per-process policy: `role: task |
+  sidecar` (required), `restart: no | on-failure | always` (default
+  `on-failure`), a windowed crash-loop cap (`max_restarts` within
+  `restart_window`), and `on_failure: terminate | continue` (default
+  `terminate`). The restart policy is suspended once shutdown begins; the
+  supervisor exits when all tasks settle (0 iff every task succeeded), on
+  an external signal, or on a `terminate` give-up. A bounded,
+  frame-granular ring buffer (drop-oldest, counted, emitted as a `drop`
+  record) keeps producers from ever blocking on the network. New
+  `examples/supervisor.yaml`.
 
 ### Fixed
 

@@ -296,13 +296,13 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 9: Documentation and example config
 
-- [ ] add `examples/supervisor.yaml` (a `task` app + a vsockd `sidecar`,
+- [x] add `examples/supervisor.yaml` (a `task` app + a vsockd `sidecar`,
       log_port matching the `log_relay` example) documenting `role`/`restart`/
       `max_restarts`/`restart_window`/`on_failure` and the shutdown triggers.
-- [ ] update `README.md` to describe the supervisor's role and the enclave log
+- [x] update `README.md` to describe the supervisor's role and the enclave log
       path (supervisor → vsock → host `log_relay`), including that it ships its
       own logs.
-- [ ] add a `CHANGELOG.md` entry.
+- [x] add a `CHANGELOG.md` entry.
 
 ## Technical Details
 

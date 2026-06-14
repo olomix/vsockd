@@ -128,6 +128,36 @@ log_port: 5140
 	}
 }
 
+// TestLoadExample guards against drift between the schema and the shipped
+// example; the example is also a reader-facing source of truth.
+func TestLoadExample(t *testing.T) {
+	cfg, err := supervisor.Load("../../examples/supervisor.yaml")
+	if err != nil {
+		t.Fatalf("Load examples/supervisor.yaml: %v", err)
+	}
+	var tasks, sidecars int
+	for _, p := range cfg.Processes {
+		switch p.Role {
+		case supervisor.RoleTask:
+			tasks++
+		case supervisor.RoleSidecar:
+			sidecars++
+		}
+	}
+	if tasks == 0 {
+		t.Fatalf("example should have at least one task")
+	}
+	if sidecars == 0 {
+		t.Fatalf("example should have at least one sidecar")
+	}
+	// The log_port must match the host-side log_relay example so the two
+	// halves of the documented log path line up.
+	if cfg.LogPort != 5140 {
+		t.Fatalf("example log_port = %d, want 5140 (log_relay example)",
+			cfg.LogPort)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	cases := []struct {
 		name    string
