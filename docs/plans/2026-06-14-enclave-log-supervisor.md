@@ -234,7 +234,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 6: Process manager (spawn, capture, role/restart/failure policy)
 
-- [ ] write tests first using the helper-process pattern: a child that writes to
+- [x] write tests first using the helper-process pattern: a child that writes to
       stdout and stderr and exits with a chosen code produces the expected
       `start`, interleaved `log` (correct `src`/`pid`/`stream`), and `exit`
       (correct `code`) records; `restart: on-failure` does not restart exit 0
@@ -248,7 +248,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
       exit 0 under `on-failure`/`no` is tolerated; **once shutdown has begun,
       nothing is restarted** (regression for decision 3); SIGTERM to the
       supervisor drains pipes, records `exit`, flushes, returns.
-- [ ] add `internal/supervisor/manager.go`: spawn each process with
+- [x] add `internal/supervisor/manager.go`: spawn each process with
       `StdoutPipe`/`StderrPipe`, per-stream line readers feeding the ring buffer
       with `src`/`pid`/`stream`; a `waitpid` loop emitting `start`/`exit` and
       applying decision 4 (restart decision → windowed budget → give-up →
@@ -257,7 +257,7 @@ breaks the dependency cycle so the supervisor can still capture and ship
       the shutting-down flag that suspends restarts, and records the resolved
       supervisor exit code (propagate the failing child's code / 128+signal).
       Log every decision via the supervisor logger (Task 5).
-- [ ] run tests (`-race`) — pass before Task 7.
+- [x] run tests (`-race`) — pass before Task 7.
 
 ### Task 7: `cmd/supervisor` main wiring
 
