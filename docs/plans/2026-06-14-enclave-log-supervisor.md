@@ -183,16 +183,16 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 2: NDJSON envelope + encoder
 
-- [ ] write tests first: each record type (`log`/`start`/`exit`/`drop`)
+- [x] write tests first: each record type (`log`/`start`/`exit`/`drop`)
       marshals to exactly one `\n`-terminated line with the expected fields;
       `exit` carries `code` and optional `signal`; timestamps come from the
       injected clock; embedded newlines in a captured line do not break framing
       (each input line → one record); every record carries the configured
       `tags` (and no `cid`/`host`).
-- [ ] add `internal/supervisor/event.go`: the envelope struct + a constructor
+- [x] add `internal/supervisor/event.go`: the envelope struct + a constructor
       per record type and a writer that emits one framed line per record. Clock
       injected as `func() time.Time`.
-- [ ] run tests — pass before Task 3.
+- [x] run tests — pass before Task 3.
 
 ### Task 3: Frame-granular ring buffer with drop accounting
 
