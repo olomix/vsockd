@@ -222,15 +222,15 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 5: Supervisor slog handler (own logs → buffer)
 
-- [ ] write tests first: an `slog.Logger` built on the handler produces, per
+- [x] write tests first: an `slog.Logger` built on the handler produces, per
       call, one `log` record with `src:"supervisor"`, the right level/msg/attrs,
       and the configured `tags`, enqueued to the buffer; the same line is also
       written to the stderr mirror; logging never blocks when the buffer is full
       (drop-oldest still applies).
-- [ ] add `internal/supervisor/sloghandler.go`: a `slog.Handler` that formats
+- [x] add `internal/supervisor/sloghandler.go`: a `slog.Handler` that formats
       records into the NDJSON envelope (`type:"log"`, `src:"supervisor"`) and
       enqueues them, plus a stderr mirror writer.
-- [ ] run tests — pass before Task 6.
+- [x] run tests — pass before Task 6.
 
 ### Task 6: Process manager (spawn, capture, role/restart/failure policy)
 
