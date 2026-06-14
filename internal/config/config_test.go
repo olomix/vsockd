@@ -561,6 +561,122 @@ metrics:
 			want: "metrics.vsock_port 9090 already declared in vsock_to_tcp[0]",
 		},
 		{
+			name: "log_relay missing output",
+			yaml: `
+log_relay:
+  - port: 5140
+    path: /var/log/app.ndjson
+`,
+			want: `output must be "file" or "stdout"`,
+		},
+		{
+			name: "log_relay file output without path",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: file
+`,
+			want: `output "file" requires a non-empty path`,
+		},
+		{
+			name: "log_relay stdout output with path",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    path: /var/log/app.ndjson
+`,
+			want: `output "stdout" must not set a path`,
+		},
+		{
+			name: "log_relay bad output",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: syslog
+`,
+			want: `output "syslog" must be`,
+		},
+		{
+			name: "log_relay port out of range",
+			yaml: `
+log_relay:
+  - port: 4294967295
+    output: stdout
+`,
+			want: "port 4294967295 out of range",
+		},
+		{
+			name: "log_relay negative max_line_bytes",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    max_line_bytes: -1
+`,
+			want: "max_line_bytes -1 must be >= 0",
+		},
+		{
+			name: "log_relay empty tag value",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    enrich:
+      tags:
+        region: ""
+`,
+			want: `enrich.tags["region"] has an empty value`,
+		},
+		{
+			name: "log_relay empty tag key",
+			yaml: `
+log_relay:
+  - port: 5140
+    output: stdout
+    enrich:
+      tags:
+        "": us-east-1
+`,
+			want: "enrich.tags has an empty key",
+		},
+		{
+			name: "log_relay port collides with outbound",
+			yaml: `
+outbound:
+  - port: 5140
+    cids:
+      - {cid: 16, allowed_hosts: ["*"]}
+log_relay:
+  - port: 5140
+    output: stdout
+`,
+			want: "duplicate port 5140 already declared in outbound[0]",
+		},
+		{
+			name: "log_relay port collides with vsock_to_tcp",
+			yaml: `
+vsock_to_tcp:
+  - port: 5140
+    upstream: "10.0.0.5:5432"
+log_relay:
+  - port: 5140
+    output: stdout
+`,
+			want: "duplicate port 5140 already declared in vsock_to_tcp[0]",
+		},
+		{
+			name: "metrics vsock_port collides with log_relay",
+			yaml: `
+log_relay:
+  - port: 9090
+    output: stdout
+metrics:
+  vsock_port: 9090
+`,
+			want: "metrics.vsock_port 9090 already declared in log_relay[0]",
+		},
+		{
 			name: "invalid log_level",
 			yaml: `
 inbound:
@@ -653,6 +769,89 @@ vsock_to_tcp:
 	}
 	if got := cfg.VsockToTCP[1].Upstream; got != "db.internal:3306" {
 		t.Fatalf("vsock_to_tcp[1].Upstream = %q", got)
+	}
+}
+
+// TestLoadLogRelay verifies the log_relay section round-trips through the
+// schema and that defaults (max_line_bytes, enrich.host_key) are applied.
+func TestLoadLogRelay(t *testing.T) {
+	yamlDoc := `
+log_relay:
+  - port: 5140
+    output: file
+    path: /var/log/enclave/app.ndjson
+    max_line_bytes: 2048
+    enrich:
+      cid: true
+      host_key: meta
+      tags:
+        region: us-east-1
+        instance: i-0abc123
+  - port: 5141
+    output: stdout
+  - port: 5142
+    output: file
+    path: /var/log/enclave/other.ndjson
+    enrich:
+      cid: true
+`
+	cfg, err := config.Load(writeConfig(t, yamlDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.LogRelay) != 3 {
+		t.Fatalf("want 3 log_relay listeners, got %d", len(cfg.LogRelay))
+	}
+
+	first := cfg.LogRelay[0]
+	if first.Port != 5140 {
+		t.Fatalf("log_relay[0].Port = %d, want 5140", first.Port)
+	}
+	if first.Output != config.LogRelayOutputFile {
+		t.Fatalf("log_relay[0].Output = %q, want file", first.Output)
+	}
+	if first.Path != "/var/log/enclave/app.ndjson" {
+		t.Fatalf("log_relay[0].Path = %q", first.Path)
+	}
+	if first.MaxLineBytes != 2048 {
+		t.Fatalf("log_relay[0].MaxLineBytes = %d, want 2048",
+			first.MaxLineBytes)
+	}
+	if first.Enrich == nil {
+		t.Fatalf("log_relay[0].Enrich = nil, want non-nil")
+	}
+	if !first.Enrich.CID {
+		t.Fatalf("log_relay[0].Enrich.CID = false, want true")
+	}
+	if first.Enrich.HostKey != "meta" {
+		t.Fatalf("log_relay[0].Enrich.HostKey = %q, want meta",
+			first.Enrich.HostKey)
+	}
+	if got := first.Enrich.Tags["region"]; got != "us-east-1" {
+		t.Fatalf("log_relay[0].Enrich.Tags[region] = %q", got)
+	}
+
+	second := cfg.LogRelay[1]
+	if second.Output != config.LogRelayOutputStdout {
+		t.Fatalf("log_relay[1].Output = %q, want stdout", second.Output)
+	}
+	if second.Path != "" {
+		t.Fatalf("log_relay[1].Path = %q, want empty", second.Path)
+	}
+	if second.Enrich != nil {
+		t.Fatalf("log_relay[1].Enrich = %+v, want nil", second.Enrich)
+	}
+	// max_line_bytes omitted -> default applied.
+	if second.MaxLineBytes != 1<<20 {
+		t.Fatalf("log_relay[1].MaxLineBytes = %d, want default 1 MiB",
+			second.MaxLineBytes)
+	}
+
+	// host_key omitted -> defaults to "host".
+	third := cfg.LogRelay[2]
+	if third.Enrich == nil || third.Enrich.HostKey != "host" {
+		t.Fatalf("log_relay[2] host_key default not applied: %+v",
+			third.Enrich)
 	}
 }
 

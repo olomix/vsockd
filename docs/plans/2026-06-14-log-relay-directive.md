@@ -160,34 +160,34 @@ inject host fields per record.
 
 ### Task 1: Add `log_relay` config schema and validation
 
-- [ ] add `LogRelayListener` struct to `internal/config/config.go`:
+- [x] add `LogRelayListener` struct to `internal/config/config.go`:
       `Port uint32 \`yaml:"port"\``, `Output string \`yaml:"output"\``,
       `Path string \`yaml:"path"\``, `MaxLineBytes int \`yaml:"max_line_bytes"\``,
       `Enrich *LogRelayEnrich \`yaml:"enrich"\``; and a `LogRelayEnrich`
       struct `{ CID bool \`yaml:"cid"\``; `Tags map[string]string
       \`yaml:"tags"\``; `HostKey string \`yaml:"host_key"\`` }`. Add
       `LogRelay []LogRelayListener \`yaml:"log_relay"\`` on `Config`.
-- [ ] add output constants `LogRelayOutputFile = "file"`,
+- [x] add output constants `LogRelayOutputFile = "file"`,
       `LogRelayOutputStdout = "stdout"`, and a `defaultMaxLineBytes` const.
-- [ ] add `(*LogRelayListener).validate()`: port in `1..vsockPortAny-1`;
+- [x] add `(*LogRelayListener).validate()`: port in `1..vsockPortAny-1`;
       `output` one of the two constants (empty → error); `path` required and
       non-empty iff `output == file`, empty iff `output == stdout`;
       `max_line_bytes` ≥ 0 (0 → default); if `enrich` set, every tag key and
       value must be non-empty, and `host_key` defaults to `host` when empty (a
       set `host_key` must be non-empty / valid as a JSON object key).
-- [ ] wire into `Config.Validate()`: include `LogRelay` in the "no listeners
+- [x] wire into `Config.Validate()`: include `LogRelay` in the "no listeners
       configured" emptiness check; loop `LogRelay`, call `validate()`, and add
       each port to the shared `seenPort` map (reuse the existing collision
       error pattern so the message names the conflicting section).
-- [ ] write tests (success): file output with path; stdout output without path;
+- [x] write tests (success): file output with path; stdout output without path;
       multiple listeners on distinct ports; `enrich` with cid+tags; a custom
       `host_key`; `host_key` defaulting to `host` when omitted; absent
       `enrich`; `max_line_bytes` defaulting.
-- [ ] write tests (error/edge): missing `output`; `output: file` without
+- [x] write tests (error/edge): missing `output`; `output: file` without
       `path`; `output: stdout` with a `path`; bad `output`; port out of range;
       port colliding with an outbound port, a `vsock_to_tcp` port, and
       `metrics.vsock_port`; empty tag key/value; negative `max_line_bytes`.
-- [ ] run `go test ./internal/config/...` — must pass before Task 2.
+- [x] run `go test ./internal/config/...` — must pass before Task 2.
 
 ### Task 2: Add `log_relay` listener mode, sink, and enrichment to outbound
 
