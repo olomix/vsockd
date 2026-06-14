@@ -52,13 +52,13 @@ type Shipper struct {
 	wake chan struct{}
 
 	// pendingDrops carries a drop count whose drop record could not be written
-	// (the connection broke mid-emit) so it is retried, not lost. Touched only
-	// by the Run goroutine.
+	// (the connection broke mid-emit) so it is retried, not lost. Written by the
+	// Run goroutine and read by Flush via idle(), both under mu.
 	pendingDrops int
 
 	// draining guards the in-flight window of a drain cycle so Flush waits for
 	// frames already taken from the buffer (and being written) before
-	// reporting the buffer fully drained.
+	// reporting the buffer fully drained. mu also guards pendingDrops.
 	mu       sync.Mutex
 	draining bool
 }
@@ -184,12 +184,17 @@ func (s *Shipper) drainOnce(conn net.Conn) error {
 	s.setDraining(true)
 	defer s.setDraining(false)
 
+	s.mu.Lock()
 	s.pendingDrops += s.buf.TakeDrops()
-	if s.pendingDrops > 0 {
-		if _, err := conn.Write(s.framer.Drop(s.cfg.PID, s.pendingDrops)); err != nil {
+	pending := s.pendingDrops
+	s.mu.Unlock()
+	if pending > 0 {
+		if _, err := conn.Write(s.framer.Drop(s.cfg.PID, pending)); err != nil {
 			return err
 		}
+		s.mu.Lock()
 		s.pendingDrops = 0
+		s.mu.Unlock()
 	}
 	if _, err := s.buf.DrainTo(conn); err != nil {
 		return err
@@ -203,12 +208,16 @@ func (s *Shipper) setDraining(v bool) {
 	s.mu.Unlock()
 }
 
-// idle reports that no drain is in flight and the buffer is empty.
+// idle reports that no drain is in flight, the buffer is empty, and no drop
+// count is still awaiting a drop record. Unreported drops keep Flush waiting so
+// shutdown does not return before loss is made observable downstream
+// (decision 8): oversized frames can be dropped to an empty buffer, so an
+// empty buffer alone does not mean every drop has been emitted.
 func (s *Shipper) idle() bool {
 	s.mu.Lock()
-	d := s.draining
+	busy := s.draining || s.pendingDrops > 0
 	s.mu.Unlock()
-	return !d && s.buf.Len() == 0
+	return !busy && s.buf.Len() == 0 && s.buf.Drops() == 0
 }
 
 // Flush best-effort drains the buffer within ctx's deadline, returning once the

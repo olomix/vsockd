@@ -111,6 +111,15 @@ func (b *RingBuffer) TakeDrops() int {
 	return d
 }
 
+// Drops reports the number of frames dropped but not yet reported, without
+// consuming the count. Flush uses it so shutdown does not return before a
+// pending drop record has been emitted downstream.
+func (b *RingBuffer) Drops() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.drops
+}
+
 // Len reports the number of frames currently queued.
 func (b *RingBuffer) Len() int {
 	b.mu.Lock()

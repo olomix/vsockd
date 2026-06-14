@@ -45,6 +45,9 @@ type envelope struct {
 	Code   *int              `json:"code,omitempty"`
 	Signal *string           `json:"signal,omitempty"`
 	Count  *int              `json:"count,omitempty"`
+	// Truncated marks a log line that exceeded the per-line cap; the "msg"
+	// carries only the retained prefix. Omitted (false) for normal lines.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // Framer builds NDJSON frames tagged with the source-side identity. The clock
@@ -74,8 +77,15 @@ func (f *Framer) frame(e envelope) []byte {
 
 // Log frames a captured output line from a child or the supervisor itself.
 func (f *Framer) Log(src string, pid int, stream, msg string) []byte {
+	return f.logLine(src, pid, stream, msg, false)
+}
+
+// logLine frames a captured output line, flagging it truncated when the line
+// exceeded the per-line cap and msg holds only the retained prefix.
+func (f *Framer) logLine(src string, pid int, stream, msg string, truncated bool) []byte {
 	return f.frame(envelope{
 		Src: src, PID: pid, Stream: stream, Type: TypeLog, Msg: new(msg),
+		Truncated: truncated,
 	})
 }
 

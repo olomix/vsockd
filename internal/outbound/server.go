@@ -556,9 +556,9 @@ type listener struct {
 	// while an in-flight relay keeps the pair it started with (plan
 	// decision 9). Bundling them prevents a connection accepted mid-swap from
 	// pairing a new sink with old enrichment. Only populated for log_relay
-	// listeners. maxLineBytes bounds a single relayed NDJSON line.
-	relay        atomic.Pointer[relayState]
-	maxLineBytes int
+	// listeners. The per-line cap (max_line_bytes) lives inside relayState so a
+	// reload changing only that limit takes effect for new connections.
+	relay atomic.Pointer[relayState]
 }
 
 func newHTTPListener(

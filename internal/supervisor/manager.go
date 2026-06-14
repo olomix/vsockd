@@ -250,21 +250,56 @@ func (m *Manager) startFailed(u *unit, err error) {
 	}()
 }
 
+// maxChildLine bounds a single captured line from a child's stdout/stderr.
+// A line longer than this is emitted truncated and the remainder is drained.
+// Mirrors log_relay's defaultLogRelayMaxLine so both ends cap a line the same.
+const maxChildLine = 1 << 20 // 1 MiB
+
 // pump reads r line by line and frames each line as a log record tagged with
-// the process name (src), pid, and stream. ReadBytes (rather than a Scanner) is
-// used so an over-long line is emitted whole instead of aborting capture of the
-// rest of the stream. A trailing partial line at EOF is still emitted.
+// the process name (src), pid, and stream. ReadSlice over a fixed buffer caps
+// per-line memory: a child that writes a huge line or never emits '\n' would
+// make an unbounded ReadBytes grow until OOM — long before the ring buffer's
+// byte budget (decision 8) could shed the frame. On overflow the capped prefix
+// is emitted flagged truncated and the rest of the line is drained so the next
+// record starts at a real line boundary. A trailing partial line at EOF is
+// still emitted.
 func (m *Manager) pump(name string, pid int, stream string, r io.Reader) {
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, maxChildLine+1)
 	for {
-		line, err := br.ReadBytes('\n')
+		line, err := br.ReadSlice('\n')
+		truncated := errors.Is(err, bufio.ErrBufferFull)
 		if len(line) > 0 {
-			line = bytes.TrimRight(line, "\r\n")
-			m.sink(m.framer.Log(name, pid, stream, string(line)))
+			payload := line
+			if truncated {
+				if len(payload) > maxChildLine {
+					payload = payload[:maxChildLine]
+				}
+			} else {
+				payload = bytes.TrimRight(payload, "\r\n")
+			}
+			m.sink(m.framer.logLine(name, pid, stream, string(payload), truncated))
+		}
+		if truncated {
+			if derr := discardToNewline(br); derr != nil {
+				return // EOF or read error while resyncing; stop.
+			}
+			continue
 		}
 		if err != nil {
 			return // io.EOF (child gone) or a read error; either way, stop.
 		}
+	}
+}
+
+// discardToNewline reads and discards bytes until the next newline (or stream
+// end), letting the reader resync after an over-long line.
+func discardToNewline(br *bufio.Reader) error {
+	for {
+		_, err := br.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return err
 	}
 }
 

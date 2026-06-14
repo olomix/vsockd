@@ -59,6 +59,10 @@ func newRefSink(s sink) *refSink { return &refSink{s: s, n: 1} }
 type relayState struct {
 	sink   *refSink
 	enrich *enrichConfig
+	// maxLineBytes lives here (not on the listener) so a same-port reload that
+	// only changes max_line_bytes takes effect: the swap installs a new
+	// relayState and new connections read the limit from the snapshot.
+	maxLineBytes int
 }
 
 // acquire takes an additional reference and returns the underlying sink. It
@@ -349,9 +353,9 @@ func newLogRelayListener(
 		server: s,
 		done:   make(chan struct{}),
 	}
-	l.maxLineBytes = cfg.MaxLineBytes
-	if l.maxLineBytes <= 0 {
-		l.maxLineBytes = defaultLogRelayMaxLine
+	maxLine := cfg.MaxLineBytes
+	if maxLine <= 0 {
+		maxLine = defaultLogRelayMaxLine
 	}
 	ec, err := newEnrichConfig(cfg.Enrich)
 	if err != nil {
@@ -363,7 +367,9 @@ func newLogRelayListener(
 			WithLabelValues(metrics.LogRelayErrorSink).Inc()
 		return nil, err
 	}
-	l.relay.Store(&relayState{sink: newRefSink(sk), enrich: ec})
+	l.relay.Store(&relayState{
+		sink: newRefSink(sk), enrich: ec, maxLineBytes: maxLine,
+	})
 	return l, nil
 }
 
@@ -394,10 +400,6 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	l.server.metric.LogRelayConnections.Inc()
 
 	cid := c.PeerCID()
-	maxLine := l.maxLineBytes
-	if maxLine <= 0 {
-		maxLine = defaultLogRelayMaxLine
-	}
 
 	// Snapshot sink and enrichment as one atomic pair and acquire a reference
 	// for this connection's lifetime, so a concurrent reload that swaps (or
@@ -420,6 +422,10 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	}
 	defer st.sink.release()
 	enr := newEnricher(st.enrich, cid)
+	maxLine := st.maxLineBytes
+	if maxLine <= 0 {
+		maxLine = defaultLogRelayMaxLine
+	}
 
 	// +1 so ReadSlice can hold a full max-length line *and* its '\n'
 	// delimiter: a line whose content is exactly maxLine bytes must be
