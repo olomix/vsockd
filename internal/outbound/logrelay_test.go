@@ -75,6 +75,22 @@ func sendLogLines(
 	_ = c.Close()
 }
 
+// sendRawLog dials a loopback log_relay port, writes payload verbatim (no
+// added delimiter), and closes — used to exercise non-'\n'-terminated input.
+func sendRawLog(
+	t *testing.T, reg *vsockconn.Registry, cid, port uint32, payload string,
+) {
+	t.Helper()
+	c, err := vsockconn.NewLoopbackDialer(reg, cid).Dial(hostCID, port)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if _, err := c.Write([]byte(payload)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = c.Close()
+}
+
 // waitForFileLines polls path until it holds at least n non-empty lines.
 func waitForFileLines(t *testing.T, path string, n int) []string {
 	t.Helper()
@@ -197,6 +213,66 @@ func TestLogRelay_CustomHostKey(t *testing.T) {
 	}
 	if strings.Contains(got, `"host":`) {
 		t.Errorf("default host key leaked: %s", got)
+	}
+}
+
+// TestLogRelay_FinalLineNoNewline verifies a record that arrives without a
+// trailing newline (peer closes mid-stream) is still emitted and enriched —
+// the EOF-with-buffered-data branch of handleLogRelay.
+func TestLogRelay_FinalLineNoNewline(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	sendRawLog(t, reg, logRelayCID, port, `{"x":1}`)
+	got := waitForFileLines(t, path, 1)[0]
+
+	if want := `{"cid":16,"x":1}`; got != want {
+		t.Fatalf("unterminated final line output = %q, want %q", got, want)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(got), &rec); err != nil {
+		t.Fatalf("output not valid JSON: %v (%s)", err, got)
+	}
+}
+
+// TestLogRelay_CRLFLineEnding verifies a "\r\n"-terminated record has the
+// trailing '\r' stripped so the spliced object stays well-formed (dropNewline
+// '\r' branch).
+func TestLogRelay_CRLFLineEnding(t *testing.T) {
+	reg := vsockconn.NewRegistry()
+	const port uint32 = 5140
+	path := filepath.Join(t.TempDir(), "app.ndjson")
+
+	cfgs := []config.LogRelayListener{{
+		Port:   port,
+		Output: config.LogRelayOutputFile,
+		Path:   path,
+		Enrich: &config.LogRelayEnrich{CID: true, HostKey: "host"},
+	}}
+	startLogRelayServer(
+		t, cfgs, newLoopbackListenFunc(reg, hostCID), metrics.New(),
+		discardLogger())
+
+	sendRawLog(t, reg, logRelayCID, port, "{\"x\":1}\r\n")
+	got := waitForFileLines(t, path, 1)[0]
+
+	if want := `{"cid":16,"x":1}`; got != want {
+		t.Fatalf("CRLF line output = %q, want %q", got, want)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(got), &rec); err != nil {
+		t.Fatalf("output not valid JSON: %v (%s)", err, got)
 	}
 }
 

@@ -47,9 +47,10 @@ this is enforced at config-load time.
 
 ## Architecture
 
-The four listener flavors are grouped by config section. `inbound` and
+The five listener flavors are grouped by config section. `inbound` and
 `outbound` are HTTP-aware and host-only; `tcp_to_vsock` and `vsock_to_tcp`
-are raw-byte pipes that work on either side of the vsock boundary.
+are raw-byte pipes that work on either side of the vsock boundary; and
+`log_relay` is a host-side, line-aware NDJSON log sink.
 
 ```
                                             vsockd (host or enclave)
@@ -78,14 +79,20 @@ are raw-byte pipes that work on either side of the vsock boundary.
                                     │   └─ dial fixed upstream       │ ◀── vsock(port) ─────── peer
                                     │   └─ raw byte pipe             │      (raw bytes)
                                     │                                │
+  local file / stdout ◀── write ─── │  log_relay (host only)         │
+  (enriched NDJSON)                 │   └─ accept vsock, read NDJSON  │ ◀── vsock(port) ─────── enclave
+                                    │   └─ splice cid + host tags    │      (NDJSON lines)
+                                    │   └─ write to file/stdout sink │
+                                    │                                │
                                     │  /metrics (Prometheus, TCP or  │
                                     │             vsock — optional)  │
                                     └────────────────────────────────┘
 ```
 
 Inside the enclave, only `tcp_to_vsock` and `vsock_to_tcp` apply — the
-HTTP-aware `inbound` / `outbound` sections depend on host-role vsock
-addressing and CID-based routing that are meaningless enclave-side.
+HTTP-aware `inbound` / `outbound` sections and the host-side `log_relay`
+sink depend on host-role vsock addressing and CID-based routing that are
+meaningless enclave-side.
 An enclave-local vsockd with just those two sections can replace the
 classic `socat` stub entirely (see below).
 
