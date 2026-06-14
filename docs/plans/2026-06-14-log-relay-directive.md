@@ -236,23 +236,23 @@ inject host fields per record.
 
 ### Task 3: Add `log_relay` metrics
 
-- [ ] write tests first: extend the Task 2 tests to assert
+- [x] write tests first: extend the Task 2 tests to assert
       `LogRelayConnections` increments per accepted connection,
       `LogRelayLines` advances per emitted line, `LogRelayBytes` advances by
       output bytes, and `LogRelayErrors{reason}` increments on sink-open
       failure, read error, and line-too-long.
-- [ ] add metric fields in `internal/metrics/metrics.go`:
+- [x] add metric fields in `internal/metrics/metrics.go`:
       `LogRelayConnections` (`log_relay_connections_total`),
       `LogRelayLines` (`log_relay_lines_total`),
       `LogRelayBytes` (`log_relay_bytes_total`),
       `LogRelayErrors *prometheus.CounterVec{reason}`
       (`log_relay_errors_total`).
-- [ ] add reason constants (`LogRelayErrorSink = "sink_open"`,
+- [x] add reason constants (`LogRelayErrorSink = "sink_open"`,
       `LogRelayErrorRead = "read_error"`,
       `LogRelayErrorLineTooLong = "line_too_long"`).
-- [ ] construct the metrics in `New()` and add them to `reg.MustRegister`.
-- [ ] emit them in `handleLogRelay` (and on sink-open failure).
-- [ ] run `go test ./internal/metrics/... ./internal/outbound/...` — must pass
+- [x] construct the metrics in `New()` and add them to `reg.MustRegister`.
+- [x] emit them in `handleLogRelay` (and on sink-open failure).
+- [x] run `go test ./internal/metrics/... ./internal/outbound/...` — must pass
       before Task 4.
 
 ### Task 4: Support `log_relay` in SIGHUP reload (add/remove/swap)

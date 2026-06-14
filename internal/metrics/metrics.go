@@ -48,6 +48,11 @@ const (
 	TCPErrorDial = "dial_fail"
 	TCPErrorCopy = "copy_error"
 
+	// log_relay error reasons. Fixed values keep the `reason` label bounded.
+	LogRelayErrorSink        = "sink_open"
+	LogRelayErrorRead        = "read_error"
+	LogRelayErrorLineTooLong = "line_too_long"
+
 	// CIDLabelUnauthorized is emitted on outbound_connections_total in place
 	// of the raw peer CID when a connection is rejected because the CID is
 	// not configured on that port. Using a fixed value prevents arbitrary
@@ -77,6 +82,14 @@ type Metrics struct {
 	VsockToTCPConnections prometheus.Counter
 	VsockToTCPBytes       *prometheus.CounterVec
 	VsockToTCPErrors      *prometheus.CounterVec
+
+	// log_relay counters. Labels are bounded: LogRelayErrors' reason ∈
+	// {sink_open, read_error, line_too_long}. The peer CID is spliced into
+	// each relayed record, never into a label, so cardinality stays constant.
+	LogRelayConnections prometheus.Counter
+	LogRelayLines       prometheus.Counter
+	LogRelayBytes       prometheus.Counter
+	LogRelayErrors      *prometheus.CounterVec
 
 	ConfigReloads *prometheus.CounterVec
 }
@@ -161,6 +174,31 @@ func New() *Metrics {
 			},
 			[]string{"reason"},
 		),
+		LogRelayConnections: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "log_relay_connections_total",
+				Help: "vsock connections accepted on log_relay listeners.",
+			},
+		),
+		LogRelayLines: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "log_relay_lines_total",
+				Help: "Enriched NDJSON lines emitted to log_relay sinks.",
+			},
+		),
+		LogRelayBytes: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "log_relay_bytes_total",
+				Help: "Bytes written to log_relay sinks.",
+			},
+		),
+		LogRelayErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "log_relay_errors_total",
+				Help: "Errors on log_relay listeners, by reason.",
+			},
+			[]string{"reason"},
+		),
 		ConfigReloads: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "config_reloads_total",
@@ -182,6 +220,10 @@ func New() *Metrics {
 		m.VsockToTCPConnections,
 		m.VsockToTCPBytes,
 		m.VsockToTCPErrors,
+		m.LogRelayConnections,
+		m.LogRelayLines,
+		m.LogRelayBytes,
+		m.LogRelayErrors,
 		m.ConfigReloads,
 	)
 	return m

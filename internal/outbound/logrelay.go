@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/olomix/vsockd/internal/config"
+	"github.com/olomix/vsockd/internal/metrics"
 	"github.com/olomix/vsockd/internal/vsockconn"
 )
 
@@ -218,6 +219,8 @@ func newLogRelayListener(
 	l.enrich.Store(ec)
 	sk, err := openSink(cfg)
 	if err != nil {
+		s.metric.LogRelayErrors.
+			WithLabelValues(metrics.LogRelayErrorSink).Inc()
 		return nil, err
 	}
 	l.sink.Store(&sk)
@@ -246,6 +249,7 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	defer c.Close()
 	l.server.trackConn(c)
 	defer l.server.untrackConn(c)
+	l.server.metric.LogRelayConnections.Inc()
 
 	cid := c.PeerCID()
 	enr := l.newEnricher(cid)
@@ -277,16 +281,23 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 			out.Reset()
 			out.Write(enr.emit(payload, truncated))
 			out.WriteByte('\n')
-			if _, werr := sk.Write(out.Bytes()); werr != nil {
+			n, werr := sk.Write(out.Bytes())
+			l.server.metric.LogRelayBytes.Add(float64(n))
+			if werr != nil {
 				l.server.logger.Warn("log_relay sink write failed",
 					"port", l.port, "cid", cid, "err", werr)
 				return
 			}
+			l.server.metric.LogRelayLines.Inc()
 		}
 
 		if truncated {
+			l.server.metric.LogRelayErrors.
+				WithLabelValues(metrics.LogRelayErrorLineTooLong).Inc()
 			if derr := discardToNewline(br); derr != nil {
 				if !errors.Is(derr, io.EOF) {
+					l.server.metric.LogRelayErrors.
+						WithLabelValues(metrics.LogRelayErrorRead).Inc()
 					l.server.logger.Warn("log_relay read error",
 						"port", l.port, "cid", cid, "err", derr)
 				}
@@ -296,6 +307,8 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
+				l.server.metric.LogRelayErrors.
+					WithLabelValues(metrics.LogRelayErrorRead).Inc()
 				l.server.logger.Warn("log_relay read error",
 					"port", l.port, "cid", cid, "err", err)
 			}
