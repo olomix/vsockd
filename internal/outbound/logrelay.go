@@ -51,12 +51,18 @@ type refSink struct {
 
 func newRefSink(s sink) *refSink { return &refSink{s: s, n: 1} }
 
-// acquire takes an additional reference and returns the underlying sink.
-func (r *refSink) acquire() sink {
+// acquire takes an additional reference and returns the underlying sink. It
+// reports false if the refSink was already released to zero (a concurrent
+// reload closed the underlying fd); the caller must then re-Load the listener's
+// current refSink rather than resurrect this dead one and write to a closed fd.
+func (r *refSink) acquire() (sink, bool) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.n == 0 {
+		return nil, false
+	}
 	r.n++
-	r.mu.Unlock()
-	return r.s
+	return r.s, true
 }
 
 // release drops one reference, closing the underlying sink when the last
@@ -308,11 +314,20 @@ func (l *listener) handleLogRelay(ctx context.Context, c vsockconn.Conn) {
 	// reload that swaps (or removes) the listener's sink does not close the
 	// fd this relay is still writing to (plan decision 9). The matching
 	// release runs after the loop returns.
-	rp := l.sink.Load()
-	if rp == nil {
-		return
+	var rp *refSink
+	var sk sink
+	for {
+		rp = l.sink.Load()
+		if rp == nil {
+			return
+		}
+		var ok bool
+		if sk, ok = rp.acquire(); ok {
+			break
+		}
+		// A concurrent reload released this refSink to zero between Load and
+		// acquire; re-Load the now-current refSink and retry.
 	}
-	sk := rp.acquire()
 	defer rp.release()
 
 	// +1 so ReadSlice can hold a full max-length line *and* its '\n'
