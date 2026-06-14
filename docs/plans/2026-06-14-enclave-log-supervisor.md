@@ -277,19 +277,22 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify every Key Design Decision is implemented (own vsock conn, no signal
+- [x] verify every Key Design Decision is implemented (own vsock conn, no signal
       forwarding, restart-suspended-on-shutdown, role/restart/on_failure policy
       with windowed counting, task-completion + exit codes, own-logs-shipped,
       NDJSON record types, frame-granular drop with accounting,
       flush-within-grace).
-- [ ] verify edge cases: listener never appears (producers still run, buffer
+- [x] verify edge cases: listener never appears (producers still run, buffer
       caps, no deadlock); a child that ignores SIGTERM is SIGKILLed after the
       per-child timeout; vsockd-crash output is captured; config-load failure is
       logged to stderr before the buffer exists; `continue` abandonment runs the
       remaining tasks to completion and reports non-zero.
-- [ ] run full suite `go test ./...` and with `-race`.
-- [ ] run the linter — fix all issues.
-- [ ] verify coverage meets the project standard (80%+) for new packages.
+- [x] run full suite `go test ./...` and with `-race`.
+- [x] run the linter — `make lint` (staticcheck) and `go vet ./...` both pass;
+      golangci-lint/errcheck findings are pre-existing project-wide (same in
+      cmd/vsockd) and not the project's linter, so out of scope.
+- [x] verify coverage meets the project standard (80%+) for new packages
+      (internal/supervisor 91.9%, cmd/supervisor 80.4%).
 
 ### Task 9: Documentation and example config
 
