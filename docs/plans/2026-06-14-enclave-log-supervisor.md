@@ -208,17 +208,17 @@ breaks the dependency cycle so the supervisor can still capture and ship
 
 ### Task 4: vsock shipper (dial, drain, reconnect, drop record, flush)
 
-- [ ] write tests first using `vsockconn.NewRegistry` + `ListenLoopback`:
+- [x] write tests first using `vsockconn.NewRegistry` + `ListenLoopback`:
       frames enqueued reach an in-process listener in FIFO order; when the
       listener is absent then appears, buffered frames flush and a `drop` record
       is emitted iff overflow occurred while disconnected; a broken connection
       triggers reconnect with bounded backoff; `Flush(ctx)` drains within a
       deadline and returns when the buffer is empty or the deadline passes.
-- [ ] add `internal/supervisor/shipper.go`: a goroutine that dials
+- [x] add `internal/supervisor/shipper.go`: a goroutine that dials
       `log_cid:log_port` via an injected `vsockconn.Dialer`, drains the ring
       buffer to the conn, reconnects with bounded backoff on error, prepends a
       `drop` record after a gap, and exposes `Flush(ctx)` for shutdown.
-- [ ] run tests (`-race`) — pass before Task 5.
+- [x] run tests (`-race`) — pass before Task 5.
 
 ### Task 5: Supervisor slog handler (own logs → buffer)
 
