@@ -43,21 +43,21 @@ The binary is `supervisor` (from `./cmd/supervisor`).
 
 ### Task 1: Add supervisor to the nightly workflow
 
-- [ ] in the `build` job's "Build static binary" step, add a second `go build`
+- [x] in the `build` job's "Build static binary" step, add a second `go build`
       mirroring vsockd:
       `go build -trimpath -ldflags "-s -w" -o "dist/supervisor-linux-${GOARCH}" ./cmd/supervisor`.
-- [ ] in the "Checksum" step, also checksum the supervisor binary
+- [x] in the "Checksum" step, also checksum the supervisor binary
       (`sha256sum supervisor-linux-${GOARCH} > supervisor-linux-${GOARCH}.sha256`).
-- [ ] broaden the `upload-artifact` step to carry both binaries per arch: rename
+- [x] broaden the `upload-artifact` step to carry both binaries per arch: rename
       the artifact to `binaries-linux-${{ matrix.goarch }}` and set the path to
       `dist/*-linux-${{ matrix.goarch }}*` (keep `if-no-files-found: error`).
       (The `release` job downloads with `merge-multiple: true`, so the artifact
       rename does not affect it.)
-- [ ] in the `release` job's `files:` list, add the four supervisor files:
+- [x] in the `release` job's `files:` list, add the four supervisor files:
       `dist/supervisor-linux-amd64`, `…amd64.sha256`,
       `dist/supervisor-linux-arm64`, `…arm64.sha256`.
-- [ ] run `actionlint .github/workflows/nightly.yml` — must report no errors.
-- [ ] verify the build command locally for both arches:
+- [x] run `actionlint .github/workflows/nightly.yml` — must report no errors.
+- [x] verify the build command locally for both arches:
       `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/supervisor-amd64 ./cmd/supervisor`
       and the same for `arm64` — both must succeed.
 
